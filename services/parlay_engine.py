@@ -1,94 +1,110 @@
-import hashlib
-import time
+"""
+Parlay generator.
+
+Upgrades:
+- gather_selections() honours user-chosen market filters
+- generate_parlay() supports "Any" market (no filter), graceful fallback when fewer events match
+- Lottery mode mixes scored picks with random long-shots
+"""
+import random
 from typing import List, Dict, Optional
 
-from services.espn_api import get_today_fixtures
-from services.analytics import analyse_fixture
+from services.espn_api import fetch_scoreboard, parse_event
+from services.analytics import build_market_options, score_selection
 
 
+# Default markets per risk band when the user picks "Any"
 RISK_PROFILES = {
-    "safe": {"min_conf": 75, "max_odds": 1.8, "target_total": 2.5},
-    "balanced": {"min_conf": 60, "max_odds": 3.0, "target_total": 5.0},
-    "risky": {"min_conf": 45, "max_odds": 6.0, "target_total": 15.0},
+    "safe":     {"picks": 3, "min_odds": 1.30, "max_odds": 1.85,
+                 "markets": ["ML", "Spread", "DC"]},
+    "balanced": {"picks": 4, "min_odds": 1.50, "max_odds": 2.50,
+                 "markets": ["ML", "Total", "Spread", "DC"]},
+    "risky":    {"picks": 5, "min_odds": 1.80, "max_odds": 4.00,
+                 "markets": ["ML", "Total", "BTTS", "Spread"]},
+    "lottery":  {"picks": 6, "min_odds": 2.50, "max_odds": 8.00,
+                 "markets": ["ML", "Total", "BTTS", "CorrectScore"]},
+}
+
+# Map of UI filter → analytics market list
+MARKET_FILTER_MAP = {
+    "any":          None,                       # use risk-profile default
+    "win":          ["ML"],
+    "draw":         ["ML"],                     # we'll filter to Draw picks below
+    "goals":        ["Total"],
+    "btts":         ["BTTS"],
+    "dc":           ["DC"],
+    "spread":       ["Spread"],
+    "correctscore": ["CorrectScore"],
 }
 
 
-MARKET_LABELS = {
-    "1X2": "Win",
-    "DC": "Win or Draw",
-    "OU": "Goals",
-    "BTTS": "BTTS",
-    "ANY": "Any",
-}
+async def gather_selections(sport: str,
+                            risk: str,
+                            markets: Optional[List[str]] = None,
+                            market_filter: Optional[str] = None) -> List[Dict]:
+    """
+    Returns a flat list of scored selection dicts.
+    `market_filter` is the UI string (any/win/draw/goals/btts/dc/spread/correctscore).
+    `markets` is an explicit list of analytics market codes (overrides filter).
+    """
+    profile = RISK_PROFILES.get(risk, RISK_PROFILES["balanced"])
+    events = await fetch_scoreboard(sport)
+    parsed = [parse_event(e) for e in events if e]
+    upcoming = [e for e in parsed if e.get("status") in ("pre", "in")]
 
+    if markets is None:
+        if market_filter and market_filter in MARKET_FILTER_MAP:
+            mapped = MARKET_FILTER_MAP[market_filter]
+            markets = mapped if mapped else profile["markets"]
+        else:
+            markets = profile["markets"]
 
-async def gather_selections(markets: Optional[List[str]] = None) -> List[Dict]:
-    fixtures = await get_today_fixtures()
-    if not fixtures:
-        return []
+    selections: List[Dict] = []
+    for ev in upcoming:
+        opts = build_market_options(ev, sport, markets)
 
-    selections = []
-    for fx in fixtures:
-        analysis = analyse_fixture(fx)
-        for sel in analysis:
-            if markets and sel["market"] not in markets:
-                continue
-            selections.append({
-                "fixture_id": fx["id"],
-                "home": fx["home"],
-                "away": fx["away"],
-                "league": fx["league"],
-                "kickoff": fx["kickoff"],
-                **sel,
-            })
+        # Special-case "Draw only"
+        if market_filter == "draw":
+            opts = [o for o in opts if o["pick"] == "Draw"]
+        # Special-case "Win or Draw" (== DC 1X / X2)
+        if market_filter == "win_or_draw":
+            opts = [o for o in opts if o["market"] == "DC" and o["pick"].startswith(("1X", "X2"))]
+
+        for o in opts:
+            if profile["min_odds"] <= o["odds"] <= profile["max_odds"]:
+                o["score"] = score_selection(o, profile)
+                selections.append(o)
+
     return selections
 
 
-async def build_parlay(
-    legs: int,
-    risk: str,
-    markets: Optional[List[str]] = None,
-) -> Dict:
+def generate_parlay(selections: List[Dict], risk: str) -> List[Dict]:
     profile = RISK_PROFILES.get(risk, RISK_PROFILES["balanced"])
+    n = profile["picks"]
+    if not selections:
+        return []
 
-    if markets and "ANY" in markets:
-        markets = None
+    selections = list(selections)
+    selections.sort(key=lambda s: s["score"], reverse=True)
 
-    selections = await gather_selections(markets=markets)
-
-    selections = [
-        s for s in selections
-        if s["confidence"] >= profile["min_conf"]
-        and s["odds"] <= profile["max_odds"]
-    ]
-    selections.sort(key=lambda x: x["confidence"], reverse=True)
-
-    used_fixtures = set()
-    chosen = []
-    for sel in selections:
-        if sel["fixture_id"] in used_fixtures:
+    seen_events = set()
+    chosen: List[Dict] = []
+    for s in selections:
+        if s["event_id"] in seen_events:
             continue
-        chosen.append(sel)
-        used_fixtures.add(sel["fixture_id"])
-        if len(chosen) == legs:
+        seen_events.add(s["event_id"])
+        chosen.append(s)
+        if len(chosen) >= n:
             break
 
-    if len(chosen) < legs:
-        return {}
+    # Lottery / risky → swap last leg with a random long-shot
+    if risk in ("risky", "lottery") and len(selections) > n:
+        pool = [s for s in selections
+                if s["event_id"] not in {c["event_id"] for c in chosen[:-1]}]
+        pool.sort(key=lambda s: s["odds"], reverse=True)  # bias long shots
+        head = pool[: max(3, n)]
+        if head:
+            random.shuffle(head)
+            chosen[-1] = head[0]
 
-    total_odds = 1.0
-    for c in chosen:
-        total_odds *= c["odds"]
-
-    cache_id = hashlib.md5(
-        f"{time.time()}:{legs}:{risk}:{markets}".encode()
-    ).hexdigest()[:10]
-
-    return {
-        "cache_id": cache_id,
-        "legs": chosen,
-        "total_odds": round(total_odds, 2),
-        "risk": risk,
-        "markets": markets or ["ANY"],
-        "target_total": profile["target_total"],
-    }
+    return chosen
