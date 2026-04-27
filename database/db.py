@@ -1,240 +1,102 @@
-import sqlite3
-import os
-from contextlib import contextmanager
-from datetime import datetime
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy import String, Float, Integer, DateTime, JSON, ForeignKey, text, func, select
+from datetime import datetime, timedelta
+from config import DATABASE_URL
 
-DB_PATH = os.getenv("DB_PATH", "parlay.db")
+
+class Base(DeclarativeBase):
+    pass
 
 
-@contextmanager
-def get_conn():
-    conn = sqlite3.connect(DB_PATH, timeout=30, isolation_level=None)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA foreign_keys=ON;")
+class User(Base):
+    __tablename__ = "users"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    tg_id: Mapped[int] = mapped_column(Integer, unique=True, index=True)
+    username: Mapped[str] = mapped_column(String(64), nullable=True)
+    bankroll: Mapped[float] = mapped_column(Float, default=100.0)
+    profit_protection: Mapped[float] = mapped_column(Float, default=0.0)
+    risk_level: Mapped[str] = mapped_column(String(16), default="balanced")
+    currency: Mapped[str] = mapped_column(String(8), default="USD")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    last_seen: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=True)
+
+
+class Parlay(Base):
+    __tablename__ = "parlays"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    target_odds: Mapped[float] = mapped_column(Float)
+    total_odds: Mapped[float] = mapped_column(Float)
+    stake: Mapped[float] = mapped_column(Float, default=0)
+    selections: Mapped[dict] = mapped_column(JSON)
+    status: Mapped[str] = mapped_column(String(16), default="pending")  # pending/won/lost
+    challenge_type: Mapped[str] = mapped_column(String(32), nullable=True)
+    challenge_stage: Mapped[int] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    settled_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
+
+
+engine = create_async_engine(DATABASE_URL, echo=False)
+SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+
+async def init_db():
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+        # Migrate existing DBs gracefully
+        for col_sql in [
+            "ALTER TABLE users ADD COLUMN currency VARCHAR(8) DEFAULT 'USD'",
+            "ALTER TABLE users ADD COLUMN last_seen DATETIME",
+        ]:
+            try:
+                await conn.execute(text(col_sql))
+            except Exception:
+                pass  # Column already exists
+
+
+async def get_or_create_user(tg_id: int, username: str = None) -> User:
+    async with SessionLocal() as s:
+        result = await s.execute(select(User).where(User.tg_id == tg_id))
+        user = result.scalar_one_or_none()
+        if not user:
+            user = User(tg_id=tg_id, username=username, last_seen=datetime.utcnow())
+            s.add(user)
+            await s.commit()
+            await s.refresh(user)
+        return user
+
+
+async def touch_user(tg_id: int) -> None:
+    """Update last_seen timestamp for presence tracking. Fire-and-forget."""
     try:
-        yield conn
-    finally:
-        conn.close()
+        async with SessionLocal() as s:
+            result = await s.execute(select(User).where(User.tg_id == tg_id))
+            user = result.scalar_one_or_none()
+            if user:
+                user.last_seen = datetime.utcnow()
+                await s.commit()
+    except Exception:
+        pass  # Non-critical — never block the main flow
 
 
-def init_db():
-    with get_conn() as c:
-        c.executescript("""
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            username TEXT,
-            first_name TEXT,
-            joined_at TEXT,
-            risk_mode TEXT DEFAULT 'balanced',
-            unit_size REAL DEFAULT 10.0,
-            preferred_sport TEXT DEFAULT 'soccer',
-            notifications INTEGER DEFAULT 1
-        );
+async def get_bot_stats(online_minutes: int = 5) -> dict:
+    """Return total user count, online count, and today's active count."""
+    async with SessionLocal() as s:
+        # Total registered users
+        total_res = await s.execute(select(func.count()).select_from(User))
+        total = total_res.scalar() or 0
 
-        CREATE TABLE IF NOT EXISTS parlays (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            sport TEXT,
-            risk_mode TEXT,
-            stake REAL,
-            total_odds REAL,
-            potential_payout REAL,
-            status TEXT DEFAULT 'pending',
-            actual_payout REAL DEFAULT 0,
-            notified INTEGER DEFAULT 0,
-            created_at TEXT,
-            settled_at TEXT,
-            FOREIGN KEY(user_id) REFERENCES users(user_id)
-        );
+        # "Online" = last_seen within the last N minutes
+        cutoff_online = datetime.utcnow() - timedelta(minutes=online_minutes)
+        online_res = await s.execute(
+            select(func.count()).select_from(User).where(User.last_seen >= cutoff_online))
+        online = online_res.scalar() or 0
 
-        CREATE TABLE IF NOT EXISTS selections (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            parlay_id INTEGER,
-            event_id TEXT,
-            event_name TEXT,
-            market TEXT,
-            pick TEXT,
-            odds REAL,
-            result TEXT DEFAULT 'pending',
-            FOREIGN KEY(parlay_id) REFERENCES parlays(id)
-        );
+        # Active today = last_seen since midnight UTC
+        today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        today_res = await s.execute(
+            select(func.count()).select_from(User).where(User.last_seen >= today_start))
+        today = today_res.scalar() or 0
 
-        CREATE TABLE IF NOT EXISTS challenges (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            challenger_id INTEGER,
-            opponent_id INTEGER,
-            sport TEXT,
-            stake REAL,
-            status TEXT DEFAULT 'open',
-            winner_id INTEGER,
-            created_at TEXT
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_parlays_user ON parlays(user_id);
-        CREATE INDEX IF NOT EXISTS idx_parlays_status ON parlays(status);
-        CREATE INDEX IF NOT EXISTS idx_parlays_notified ON parlays(notified, status);
-        CREATE INDEX IF NOT EXISTS idx_selections_parlay ON selections(parlay_id);
-        """)
-        # Defensive migrations for older DBs that lack the `notified` column
-        cols = [r["name"] for r in c.execute("PRAGMA table_info(parlays)").fetchall()]
-        if "notified" not in cols:
-            c.execute("ALTER TABLE parlays ADD COLUMN notified INTEGER DEFAULT 0")
-
-
-def upsert_user(user_id, username, first_name):
-    with get_conn() as c:
-        c.execute("""
-            INSERT INTO users (user_id, username, first_name, joined_at)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET
-                username=excluded.username,
-                first_name=excluded.first_name
-        """, (user_id, username, first_name, datetime.utcnow().isoformat()))
-
-
-def get_user(user_id):
-    with get_conn() as c:
-        row = c.execute("SELECT * FROM users WHERE user_id=?", (user_id,)).fetchone()
-        return dict(row) if row else None
-
-
-def update_user_pref(user_id, field, value):
-    allowed = {"risk_mode", "unit_size", "preferred_sport", "notifications"}
-    if field not in allowed:
-        return
-    with get_conn() as c:
-        c.execute(f"UPDATE users SET {field}=? WHERE user_id=?", (value, user_id))
-
-
-def save_parlay(user_id, sport, risk_mode, stake, total_odds, selections):
-    payout = stake * total_odds
-    with get_conn() as c:
-        cur = c.execute("""
-            INSERT INTO parlays (user_id, sport, risk_mode, stake, total_odds, potential_payout, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (user_id, sport, risk_mode, stake, total_odds, payout, datetime.utcnow().isoformat()))
-        pid = cur.lastrowid
-        for s in selections:
-            c.execute("""
-                INSERT INTO selections (parlay_id, event_id, event_name, market, pick, odds)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (pid, s["event_id"], s["event_name"], s["market"], s["pick"], s["odds"]))
-        return pid
-
-
-def get_parlay(parlay_id):
-    with get_conn() as c:
-        row = c.execute("SELECT * FROM parlays WHERE id=?", (parlay_id,)).fetchone()
-        return dict(row) if row else None
-
-
-def get_pending_parlays():
-    with get_conn() as c:
-        return [dict(r) for r in c.execute("SELECT * FROM parlays WHERE status='pending'").fetchall()]
-
-
-def get_unnotified_settled_parlays():
-    with get_conn() as c:
-        rows = c.execute("""
-            SELECT * FROM parlays
-            WHERE status IN ('won','lost') AND notified=0
-        """).fetchall()
-        return [dict(r) for r in rows]
-
-
-def mark_parlay_notified(parlay_id):
-    with get_conn() as c:
-        c.execute("UPDATE parlays SET notified=1 WHERE id=?", (parlay_id,))
-
-
-def get_selections(parlay_id):
-    with get_conn() as c:
-        return [dict(r) for r in c.execute(
-            "SELECT * FROM selections WHERE parlay_id=?", (parlay_id,)
-        ).fetchall()]
-
-
-def update_selection_result(sel_id, result):
-    with get_conn() as c:
-        c.execute("UPDATE selections SET result=? WHERE id=?", (result, sel_id))
-
-
-def settle_parlay(parlay_id, status, actual_payout):
-    with get_conn() as c:
-        c.execute("""
-            UPDATE parlays SET status=?, actual_payout=?, settled_at=?
-            WHERE id=?
-        """, (status, actual_payout, datetime.utcnow().isoformat(), parlay_id))
-
-
-def user_recent_parlays(user_id, limit=10):
-    with get_conn() as c:
-        return [dict(r) for r in c.execute("""
-            SELECT * FROM parlays WHERE user_id=?
-            ORDER BY id DESC LIMIT ?
-        """, (user_id, limit)).fetchall()]
-
-
-def user_stats(user_id):
-    with get_conn() as c:
-        row = c.execute("""
-            SELECT
-                COUNT(*) as total,
-                SUM(CASE WHEN status='won' THEN 1 ELSE 0 END) as wins,
-                SUM(CASE WHEN status='lost' THEN 1 ELSE 0 END) as losses,
-                SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) as pending,
-                COALESCE(SUM(stake),0) as total_staked,
-                COALESCE(SUM(actual_payout),0) as total_won,
-                COALESCE(MAX(total_odds),0) as biggest_odds
-            FROM parlays WHERE user_id=?
-        """, (user_id,)).fetchone()
-        stats = dict(row) if row else {}
-        # Compute current streak (consecutive same-status latest settled parlays)
-        streak = 0
-        streak_type = None
-        rows = c.execute("""
-            SELECT status FROM parlays WHERE user_id=? AND status IN ('won','lost')
-            ORDER BY id DESC LIMIT 50
-        """, (user_id,)).fetchall()
-        for r in rows:
-            if streak_type is None:
-                streak_type = r["status"]
-                streak = 1
-            elif r["status"] == streak_type:
-                streak += 1
-            else:
-                break
-        stats["streak"] = streak
-        stats["streak_type"] = streak_type
-        return stats
-
-
-def leaderboard(limit=10):
-    with get_conn() as c:
-        return [dict(r) for r in c.execute("""
-            SELECT u.username, u.first_name, u.user_id,
-                COUNT(p.id) as parlays,
-                SUM(CASE WHEN p.status='won' THEN 1 ELSE 0 END) as wins,
-                COALESCE(SUM(p.actual_payout - p.stake),0) as profit
-            FROM users u
-            LEFT JOIN parlays p ON p.user_id = u.user_id
-            GROUP BY u.user_id
-            HAVING parlays > 0
-            ORDER BY profit DESC
-            LIMIT ?
-        """, (limit,)).fetchall()]
-
-
-def create_challenge(challenger_id, opponent_id, sport, stake):
-    with get_conn() as c:
-        cur = c.execute("""
-            INSERT INTO challenges (challenger_id, opponent_id, sport, stake, created_at)
-            VALUES (?, ?, ?, ?, ?)
-        """, (challenger_id, opponent_id, sport, stake, datetime.utcnow().isoformat()))
-        return cur.lastrowid
-
-
-def all_users():
-    with get_conn() as c:
-        return [dict(r) for r in c.execute("SELECT user_id, notifications FROM users").fetchall()]
+    return {"total": total, "online": online, "today": today, "online_minutes": online_minutes}
