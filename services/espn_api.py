@@ -1,7 +1,8 @@
 import aiohttp
 import asyncio
-from datetime import datetime, timedelta
 from config import ESPN_BASE, LEAGUES
+
+_TIMEOUT = aiohttp.ClientTimeout(total=15)
 
 
 class ESPNClient:
@@ -10,7 +11,7 @@ class ESPNClient:
 
     async def _get_session(self):
         if not self.session or self.session.closed:
-            self.session = aiohttp.ClientSession()
+            self.session = aiohttp.ClientSession(timeout=_TIMEOUT)
         return self.session
 
     async def close(self):
@@ -23,7 +24,7 @@ class ESPNClient:
         params = {"dates": date} if date else {}
         session = await self._get_session()
         try:
-            async with session.get(url, params=params, timeout=15) as r:
+            async with session.get(url, params=params) as r:
                 if r.status != 200:
                     return None
                 return await r.json()
@@ -68,15 +69,16 @@ class ESPNClient:
                 if comp.get("odds"):
                     o = comp["odds"][0]
                     fixture["odds"] = {
-                        "details": o.get("details", ""),
+                        "details":    o.get("details", ""),
                         "over_under": o.get("overUnder"),
-                        "spread": o.get("spread"),
-                        "home_ml": o.get("homeTeamOdds", {}).get("moneyLine"),
-                        "away_ml": o.get("awayTeamOdds", {}).get("moneyLine"),
-                        "draw_odds": o.get("drawOdds", {}).get("moneyLine") if o.get("drawOdds") else None,
-                        "provider": o.get("provider", {}).get("name", "DraftKings"),
+                        "spread":     o.get("spread"),
+                        "home_ml":    o.get("homeTeamOdds", {}).get("moneyLine"),
+                        "away_ml":    o.get("awayTeamOdds", {}).get("moneyLine"),
+                        "draw_odds":  o.get("drawOdds", {}).get("moneyLine") if o.get("drawOdds") else None,
+                        "provider":   o.get("provider", {}).get("name", "DraftKings"),
                     }
                 fixtures.append(fixture)
             except Exception:
                 continue
         return fixtures
+

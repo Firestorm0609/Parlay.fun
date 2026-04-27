@@ -1,6 +1,6 @@
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-from sqlalchemy import String, Float, Integer, DateTime, JSON, Boolean, ForeignKey
+from sqlalchemy import String, Float, Integer, DateTime, JSON, Boolean, ForeignKey, text
 from datetime import datetime
 from config import DATABASE_URL
 
@@ -17,6 +17,7 @@ class User(Base):
     bankroll: Mapped[float] = mapped_column(Float, default=100.0)
     profit_protection: Mapped[float] = mapped_column(Float, default=0.0)
     risk_level: Mapped[str] = mapped_column(String(16), default="balanced")
+    currency: Mapped[str] = mapped_column(String(8), default="USD")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
@@ -42,6 +43,11 @@ SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=
 async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # Migrate existing DBs — add currency column if missing
+        try:
+            await conn.execute(text("ALTER TABLE users ADD COLUMN currency VARCHAR(8) DEFAULT 'USD'"))
+        except Exception:
+            pass  # Column already exists
 
 
 async def get_or_create_user(tg_id: int, username: str = None) -> User:
@@ -55,3 +61,4 @@ async def get_or_create_user(tg_id: int, username: str = None) -> User:
             await s.commit()
             await s.refresh(user)
         return user
+

@@ -1,5 +1,21 @@
 from datetime import datetime
 
+CURRENCY_SYMBOLS = {
+    "USD": "$",
+    "EUR": "€",
+    "GBP": "£",
+    "NGN": "₦",
+    "CAD": "C$",
+    "AUD": "A$",
+    "ZAR": "R",
+    "INR": "₹",
+    "BRL": "R$",
+    "KES": "KSh",
+}
+
+def currency_symbol(code: str) -> str:
+    return CURRENCY_SYMBOLS.get(code, code)
+
 
 def format_parlay(parlay, target_odds):
     lines = [
@@ -22,7 +38,7 @@ def format_parlay(parlay, target_odds):
     return "\n".join(lines)
 
 
-def format_stats(stats):
+def format_stats(stats, sym="$"):
     return (
         f"📊 *Your Performance*\n\n"
         f"Total Parlays: {stats['total']}\n"
@@ -30,7 +46,8 @@ def format_stats(stats):
         f"❌ Lost: {stats['lost']}\n"
         f"⏳ Pending: {stats['pending']}\n"
         f"🎯 Win Rate: {stats['win_rate']:.1f}%\n"
-        f"💰 Profit: {stats['profit']:.2f}\n"
+        f"💰 Profit: {sym}{stats['profit']:.2f}\n"
         f"📈 ROI: {stats['roi']:.2f}%\n"
-        f"💵 Total Staked: {stats['staked']:.2f}"
+        f"💵 Total Staked: {sym}{stats['staked']:.2f}"
     )
+
