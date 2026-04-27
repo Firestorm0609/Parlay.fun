@@ -1,68 +1,74 @@
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
+from handlers.parlay import build_and_send, parlay_custom_prompt
 
-from database.db import create_challenge
+CHALLENGES = {
+    "rollover_2":   {"name": "2.0 Rollover",  "target": 2.0,  "max_stages": 10},
+    "rollover_1_5": {"name": "1.5 Rollover",  "target": 1.5,  "max_stages": 15},
+    "longshot":     {"name": "Long Shot",      "target": None, "max_stages": 1},
+}
 
 
-async def challenge_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not ctx.args or len(ctx.args) < 2:
-        await update.message.reply_text(
-            "Usage: `/challenge @username <stake>`\nExample: `/challenge @bob 50`",
-            parse_mode="Markdown",
-        )
-        return
-    target = ctx.args[0].lstrip("@")
-    try:
-        stake = float(ctx.args[1])
-        if stake <= 0:
-            raise ValueError
-    except ValueError:
-        await update.message.reply_text("Stake must be a positive number.")
-        return
-
-    challenger = update.effective_user
-    msg = (
-        "⚔️ *Parlay Duel!*\n"
-        f"@{challenger.username or challenger.first_name} challenges @{target} "
-        f"to a parlay duel for *{stake:g}u*.\n\n"
-        "Both players build a parlay — whoever cashes wins the pot."
+async def challenges_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "🏆 *Betting Challenges*\n\n"
+        "🥇 *2.0 Rollover* — 10 stages of ×2 compounding\n"
+        "🥈 *1.5 Rollover* — 15 stages of safer ×1.5 growth\n"
+        "🚀 *Long Shot* — Your custom high-risk, high-reward target\n\n"
+        "💡 _30% profit protection kicks in automatically after each win._"
     )
-    kb = [[
-        InlineKeyboardButton("✅ Accept",
-                             callback_data=f"chal:accept:{challenger.id}:{stake}"),
-        InlineKeyboardButton("❌ Decline",
-                             callback_data=f"chal:decline:{challenger.id}"),
-    ]]
-    await update.message.reply_text(msg, parse_mode="Markdown",
-                                    reply_markup=InlineKeyboardMarkup(kb))
+    kb = [
+        [InlineKeyboardButton("🥇 2.0 Rollover (×2)",    callback_data="chal_rollover_2_1")],
+        [InlineKeyboardButton("🥈 1.5 Rollover (×1.5)",  callback_data="chal_rollover_1_5_1")],
+        [InlineKeyboardButton("🚀 Long Shot (Custom ×)", callback_data="chal_longshot_1")],
+        [InlineKeyboardButton("🏠 Main Menu",             callback_data="menu_main")],
+    ]
+    if update.callback_query:
+        await update.callback_query.edit_message_text(
+            text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
+    else:
+        await update.message.reply_text(
+            text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
 
 
-async def accept_challenge(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def challenge_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    parts = q.data.split(":")
-    action = parts[1]
+    parts = q.data.split("_")
+    stage = int(parts[-1])
+    chal_key = "_".join(parts[1:-1])
 
-    if action == "decline":
-        await q.edit_message_text("❌ Challenge declined.")
+    challenge = CHALLENGES.get(chal_key)
+    if not challenge:
+        kb = [[InlineKeyboardButton("🏠 Main Menu", callback_data="menu_main")]]
+        await q.edit_message_text("❌ Unknown challenge.", reply_markup=InlineKeyboardMarkup(kb))
         return
 
-    if action != "accept" or len(parts) < 4:
-        return
-    try:
-        challenger_id = int(parts[2])
-        stake = float(parts[3])
-    except ValueError:
+    if stage > challenge["max_stages"]:
+        kb = [
+            [InlineKeyboardButton("🏆 Challenges", callback_data="menu_challenges")],
+            [InlineKeyboardButton("🏠 Main Menu",  callback_data="menu_main")],
+        ]
+        await q.edit_message_text(
+            f"🎉 *Challenge Complete!*\n\n"
+            f"You finished all {challenge['max_stages']} stages of *{challenge['name']}*!\n"
+            "Congratulations! 🥳",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(kb))
         return
 
-    opponent = update.effective_user
-    if opponent.id == challenger_id:
-        await q.answer("You can't accept your own challenge.", show_alert=True)
+    # Long Shot has no fixed target — ask user to type their own
+    if challenge["target"] is None:
+        await parlay_custom_prompt(
+            update, context,
+            challenge=challenge["name"],
+            stage=stage)
         return
 
-    cid = create_challenge(challenger_id, opponent.id, "soccer", stake)
-    await q.edit_message_text(
-        f"✅ *Challenge #{cid} accepted!*\n"
-        "Both players run /parlay — best result wins the pot.",
-        parse_mode="Markdown",
+    await build_and_send(
+        update, context,
+        target_odds=challenge["target"],
+        challenge=challenge["name"],
+        stage=stage,
     )
+
