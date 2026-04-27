@@ -1,172 +1,240 @@
+"""
+Probability + market-builder + result-checker logic.
+
+Major upgrades vs original:
+- Deterministic odds-per-event (seeded by event_id) so refreshes are stable
+- DC (Double Chance) market generation
+- Robust result checking with team-name normalisation
+- Spread/Total parsing fixed
+- ML draw handling
+"""
 import math
+import random
 from typing import List, Dict
 
 
-TEAM_STRENGTH_DEFAULT = 0.5
+# ---------- Probability helpers ----------
+def implied_prob(odds: float) -> float:
+    return 1.0 / odds if odds and odds > 0 else 0.0
 
 
-def _team_strength(team: str) -> float:
-    h = sum(ord(c) for c in team) % 100
-    return 0.35 + (h / 100) * 0.5
+def fair_odds_from_prob(p: float, vig: float = 0.05) -> float:
+    """Convert probability → odds, applying a small bookmaker margin."""
+    p = max(0.02, min(0.98, p))
+    return round(1.0 / (p * (1 + vig)), 2)
 
 
-def _poisson_pmf(lmbda: float, k: int) -> float:
-    return math.exp(-lmbda) * (lmbda ** k) / math.factorial(k)
+def estimate_team_strength(team_name: str) -> float:
+    """Deterministic pseudo-strength from team name (0.40–0.99)."""
+    h = sum(ord(c) for c in (team_name or ""))
+    return 0.40 + ((h * 13) % 60) / 100.0
 
 
-def _match_probs(home_str: float, away_str: float) -> Dict[str, float]:
-    home_xg = 1.1 + home_str * 1.4
-    away_xg = 0.8 + away_str * 1.2
-
-    p_home = p_draw = p_away = 0.0
-    for i in range(0, 6):
-        for j in range(0, 6):
-            p = _poisson_pmf(home_xg, i) * _poisson_pmf(away_xg, j)
-            if i > j:
-                p_home += p
-            elif i == j:
-                p_draw += p
-            else:
-                p_away += p
-
-    total = p_home + p_draw + p_away
+def home_advantage(sport: str) -> float:
     return {
-        "home": p_home / total,
-        "draw": p_draw / total,
-        "away": p_away / total,
-        "home_xg": home_xg,
-        "away_xg": away_xg,
+        "soccer": 0.08, "basketball": 0.05, "football": 0.07,
+        "baseball": 0.04, "hockey": 0.05,
+    }.get(sport, 0.05)
+
+
+def _seeded_rng(event_id, market):
+    """Per-event deterministic RNG so a refresh shows stable odds."""
+    seed = abs(hash(f"{event_id}:{market}")) % (2**31)
+    return random.Random(seed)
+
+
+# ---------- Market builder ----------
+def build_market_options(event: Dict, sport: str, markets: List[str]) -> List[Dict]:
+    """Generate plausible (event, market, pick, odds) options."""
+    opts: List[Dict] = []
+    home, away = event["home"], event["away"]
+    s_home = estimate_team_strength(home) + home_advantage(sport)
+    s_away = estimate_team_strength(away)
+
+    # Soccer needs a draw probability
+    if sport == "soccer":
+        gap = abs(s_home - s_away)
+        p_draw = max(0.18, 0.32 - gap * 0.3)
+        remaining = 1 - p_draw
+        denom = s_home + s_away
+        p_home = remaining * (s_home / denom)
+        p_away = remaining * (s_away / denom)
+    else:
+        denom = s_home + s_away
+        p_home = s_home / denom
+        p_away = s_away / denom
+        p_draw = 0.0
+
+    rng = _seeded_rng(event["id"], "core")
+
+    if "ML" in markets or "Win" in markets:
+        opts.append(_mk(event, "ML", f"{home} to win", fair_odds_from_prob(p_home)))
+        opts.append(_mk(event, "ML", f"{away} to win", fair_odds_from_prob(p_away)))
+        if sport == "soccer" and ("Draw" in markets or "ML" in markets):
+            opts.append(_mk(event, "ML", "Draw", fair_odds_from_prob(p_draw)))
+
+    if "DC" in markets and sport == "soccer":
+        opts.append(_mk(event, "DC", f"1X ({home} or Draw)",
+                        fair_odds_from_prob(p_home + p_draw)))
+        opts.append(_mk(event, "DC", f"X2 ({away} or Draw)",
+                        fair_odds_from_prob(p_away + p_draw)))
+        opts.append(_mk(event, "DC", f"12 ({home} or {away})",
+                        fair_odds_from_prob(p_home + p_away)))
+
+    if "Spread" in markets:
+        line = round((s_home - s_away) * 5, 1)
+        line = round(line * 2) / 2
+        if line == 0:
+            line = 0.5
+        opts.append(_mk(event, "Spread",
+                        f"{home} {-abs(line):+.1f}",
+                        round(rng.uniform(1.80, 1.95), 2)))
+        opts.append(_mk(event, "Spread",
+                        f"{away} {abs(line):+.1f}",
+                        round(rng.uniform(1.80, 1.95), 2)))
+
+    if "Total" in markets or "Goals" in markets:
+        ou_line = _ou_line(sport)
+        opts.append(_mk(event, "Total", f"Over {ou_line}",
+                        round(rng.uniform(1.80, 2.00), 2)))
+        opts.append(_mk(event, "Total", f"Under {ou_line}",
+                        round(rng.uniform(1.80, 2.00), 2)))
+
+    if "BTTS" in markets and sport == "soccer":
+        p_btts = min(0.78, 0.45 + (s_home + s_away - 1) * 0.4)
+        opts.append(_mk(event, "BTTS", "Yes", fair_odds_from_prob(p_btts)))
+        opts.append(_mk(event, "BTTS", "No", fair_odds_from_prob(1 - p_btts)))
+
+    if "CorrectScore" in markets and sport == "soccer":
+        rng2 = _seeded_rng(event["id"], "cs")
+        for sc in ["1-0", "2-1", "2-0", "1-1", "0-0", "0-1"]:
+            opts.append(_mk(event, "CorrectScore", sc, round(rng2.uniform(5.5, 14.0), 2)))
+
+    return opts
+
+
+def _ou_line(sport: str) -> float:
+    return {
+        "soccer": 2.5, "basketball": 220.5, "football": 45.5,
+        "baseball": 8.5, "hockey": 6.5,
+    }.get(sport, 2.5)
+
+
+def _mk(event, market, pick, odds):
+    return {
+        "event_id": event["id"],
+        "event_name": f"{event['away']} @ {event['home']}",
+        "home": event["home"],
+        "away": event["away"],
+        "market": market,
+        "pick": pick,
+        "odds": round(odds, 2),
     }
 
 
-def _odds_from_prob(p: float, vig: float = 0.05) -> float:
-    if p <= 0:
-        return 99.0
-    fair = 1 / p
-    return round(fair * (1 - vig), 2)
+# ---------- Scoring ----------
+def score_selection(opt: Dict, profile: Dict) -> float:
+    o = opt["odds"]
+    mid = (profile["min_odds"] + profile["max_odds"]) / 2
+    span = max(profile["max_odds"] - profile["min_odds"], 0.01)
+    closeness = 1 - abs(o - mid) / span
+    market_bias = {
+        "ML": 1.10, "Total": 1.05, "DC": 1.08, "Spread": 1.00,
+        "BTTS": 0.95, "CorrectScore": 0.85,
+    }.get(opt["market"], 1.0)
+    rng = _seeded_rng(opt["event_id"], opt["pick"])
+    return round(closeness * market_bias + rng.uniform(0, 0.12), 4)
 
 
-def _confidence(prob: float, odds: float, edge_bias: float = 0.0) -> int:
-    base = prob * 100
-    edge = (prob * odds - 1) * 30
-    score = base + edge + edge_bias
-    return max(0, min(100, int(score)))
+def compute_total_odds(selections: List[Dict]) -> float:
+    total = 1.0
+    for s in selections:
+        total *= s.get("odds", 1.0)
+    return round(total, 2)
 
 
-def analyse_fixture(fx: Dict) -> List[Dict]:
-    home_str = _team_strength(fx["home"])
-    away_str = _team_strength(fx["away"])
-    probs = _match_probs(home_str, away_str)
+# ---------- Result checking ----------
+def _norm(s: str) -> str:
+    return (s or "").strip().lower()
 
-    selections = []
 
-    home_odds = _odds_from_prob(probs["home"])
-    draw_odds = _odds_from_prob(probs["draw"])
-    away_odds = _odds_from_prob(probs["away"])
+def _check_selection(sel: Dict, event_summary: Dict) -> str:
+    """Decide W/L/pending for a selection given an event summary."""
+    if not event_summary or not event_summary.get("completed"):
+        return "pending"
+    try:
+        h = float(event_summary.get("home_score") or 0)
+        a = float(event_summary.get("away_score") or 0)
+    except (TypeError, ValueError):
+        return "pending"
 
-    if probs["home"] >= 0.45:
-        selections.append({
-            "market": "1X2",
-            "pick": "home",
-            "label": f"{fx['home']} to win",
-            "odds": home_odds,
-            "prob": round(probs["home"], 3),
-            "confidence": _confidence(probs["home"], home_odds, 5),
-        })
-    if probs["away"] >= 0.45:
-        selections.append({
-            "market": "1X2",
-            "pick": "away",
-            "label": f"{fx['away']} to win",
-            "odds": away_odds,
-            "prob": round(probs["away"], 3),
-            "confidence": _confidence(probs["away"], away_odds, 5),
-        })
-    if probs["draw"] >= 0.32:
-        selections.append({
-            "market": "1X2",
-            "pick": "draw",
-            "label": "Draw",
-            "odds": draw_odds,
-            "prob": round(probs["draw"], 3),
-            "confidence": _confidence(probs["draw"], draw_odds, 0),
-        })
+    market = sel["market"]
+    pick = sel["pick"]
+    home = event_summary.get("home") or ""
+    away = event_summary.get("away") or ""
 
-    p_1x = probs["home"] + probs["draw"]
-    p_x2 = probs["away"] + probs["draw"]
-    if p_1x >= 0.62:
-        odds = _odds_from_prob(p_1x)
-        selections.append({
-            "market": "DC",
-            "pick": "1X",
-            "label": f"{fx['home']} or Draw",
-            "odds": odds,
-            "prob": round(p_1x, 3),
-            "confidence": _confidence(p_1x, odds, 4),
-        })
-    if p_x2 >= 0.62:
-        odds = _odds_from_prob(p_x2)
-        selections.append({
-            "market": "DC",
-            "pick": "X2",
-            "label": f"{fx['away']} or Draw",
-            "odds": odds,
-            "prob": round(p_x2, 3),
-            "confidence": _confidence(p_x2, odds, 4),
-        })
+    # ---- Moneyline ----
+    if market == "ML":
+        if pick == "Draw":
+            return "won" if h == a else "lost"
+        if "to win" in pick.lower():
+            team = pick.lower().replace(" to win", "").strip()
+            if h > a and _norm(home) == team:
+                return "won"
+            if a > h and _norm(away) == team:
+                return "won"
+            return "lost"
+        return "pending"
 
-    expected_goals = probs["home_xg"] + probs["away_xg"]
-    over_prob = 1 - sum(_poisson_pmf(expected_goals, k) for k in range(0, 3))
-    over_prob = max(0.05, min(0.95, over_prob))
-    under_prob = 1 - over_prob
-    if over_prob >= 0.55:
-        odds = _odds_from_prob(over_prob)
-        selections.append({
-            "market": "OU",
-            "pick": "over_2_5",
-            "label": "Over 2.5 goals",
-            "odds": odds,
-            "prob": round(over_prob, 3),
-            "confidence": _confidence(over_prob, odds, 3),
-        })
-    if under_prob >= 0.55:
-        odds = _odds_from_prob(under_prob)
-        selections.append({
-            "market": "OU",
-            "pick": "under_2_5",
-            "label": "Under 2.5 goals",
-            "odds": odds,
-            "prob": round(under_prob, 3),
-            "confidence": _confidence(under_prob, odds, 3),
-        })
+    # ---- Double Chance ----
+    if market == "DC":
+        winner = "home" if h > a else "away" if a > h else "draw"
+        code = pick.split()[0]  # 1X / X2 / 12
+        if code == "1X":
+            return "won" if winner in ("home", "draw") else "lost"
+        if code == "X2":
+            return "won" if winner in ("away", "draw") else "lost"
+        if code == "12":
+            return "won" if winner in ("home", "away") else "lost"
+        return "pending"
 
-    p_home_scores = 1 - _poisson_pmf(probs["home_xg"], 0)
-    p_away_scores = 1 - _poisson_pmf(probs["away_xg"], 0)
-    btts_yes = p_home_scores * p_away_scores
-    attack_factor = (home_str + away_str) / 2
-    btts_yes = 0.6 * btts_yes + 0.4 * (0.55 + (attack_factor - 0.5) * 0.20)
-    btts_yes = max(0.25, min(0.85, btts_yes))
-    btts_no = 1 - btts_yes
+    # ---- Totals ----
+    if market == "Total":
+        try:
+            line = float(pick.split()[-1])
+        except (ValueError, IndexError):
+            return "pending"
+        total_pts = h + a
+        if pick.startswith("Over"):
+            if total_pts == line:
+                return "push"
+            return "won" if total_pts > line else "lost"
+        if pick.startswith("Under"):
+            if total_pts == line:
+                return "push"
+            return "won" if total_pts < line else "lost"
+        return "pending"
 
-    if btts_yes >= 0.6:
-        yes_odds = _odds_from_prob(btts_yes)
-        selections.append({
-            "market": "BTTS",
-            "pick": "yes",
-            "label": "Both teams to score: Yes",
-            "odds": yes_odds,
-            "prob": round(btts_yes, 3),
-            "confidence": _confidence(btts_yes, yes_odds, 0),
-        })
-    if btts_no >= 0.6:
-        no_odds = _odds_from_prob(btts_no)
-        selections.append({
-            "market": "BTTS",
-            "pick": "no",
-            "label": "Both teams to score: No",
-            "odds": no_odds,
-            "prob": round(btts_no, 3),
-            "confidence": _confidence(btts_no, no_odds, 0),
-        })
+    # ---- BTTS ----
+    if market == "BTTS":
+        btts = h > 0 and a > 0
+        return "won" if (pick == "Yes") == btts else "lost"
 
-    return selections
+    # ---- Spread ----
+    if market == "Spread":
+        try:
+            sign_line = float(pick.split()[-1])
+        except (ValueError, IndexError):
+            return "pending"
+        is_home_pick = _norm(pick).startswith(_norm(home))
+        margin = (h - a) if is_home_pick else (a - h)
+        adjusted = margin + sign_line
+        if adjusted == 0:
+            return "push"
+        return "won" if adjusted > 0 else "lost"
+
+    # ---- Correct Score ----
+    if market == "CorrectScore":
+        return "won" if f"{int(h)}-{int(a)}" == pick else "lost"
+
+    return "pending"
