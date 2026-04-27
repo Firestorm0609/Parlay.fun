@@ -13,7 +13,6 @@ RISK_PROFILES = {
 }
 
 
-# Friendly labels for UI buttons
 MARKET_LABELS = {
     "1X2": "Win",
     "DC": "Win or Draw",
@@ -50,17 +49,8 @@ async def build_parlay(
     risk: str,
     markets: Optional[List[str]] = None,
 ) -> Dict:
-    """Build a parlay.
-
-    Args:
-        legs: number of selections (2..6)
-        risk: "safe" | "balanced" | "risky"
-        markets: optional list of market codes to restrict to, e.g. ["1X2", "DC"].
-                 None or empty means no restriction.
-    """
     profile = RISK_PROFILES.get(risk, RISK_PROFILES["balanced"])
 
-    # Treat empty list / "ANY" sentinel as no filter
     if markets and "ANY" in markets:
         markets = None
 
