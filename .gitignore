@@ -1,0 +1,16 @@
+# Sensitive/config
+config.py
+.env
+
+# Database
+*.db
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Logs
+*.log
