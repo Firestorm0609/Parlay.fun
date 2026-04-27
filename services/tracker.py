@@ -11,7 +11,6 @@ logger = logging.getLogger(__name__)
 
 async def save_parlay(user_id: int, parlay: dict, stake: float = 0) -> int:
     async with async_session() as s:
-        # ensure user
         u = await s.scalar(select(User).where(User.tg_id == user_id))
         if not u:
             u = User(tg_id=user_id)
@@ -51,11 +50,6 @@ async def save_parlay(user_id: int, parlay: dict, stake: float = 0) -> int:
 
 
 async def settle_pending() -> List[Dict]:
-    """Settle any pending parlays whose fixtures have finished.
-
-    Returns a list of dicts describing parlays that *just* moved to a
-    terminal state, so the caller can notify users.
-    """
     notifications: List[Dict] = []
 
     async with async_session() as s:
@@ -63,8 +57,6 @@ async def settle_pending() -> List[Dict]:
             select(Parlay).where(Parlay.status == "pending")
         )).scalars().all()
 
-        # Cache fixture results within this run so multiple parlays sharing
-        # a fixture don't trigger duplicate HTTP calls.
         result_cache: Dict[str, Dict] = {}
 
         for p in pending:
@@ -74,7 +66,7 @@ async def settle_pending() -> List[Dict]:
 
             all_done = True
             won = True
-            any_void_only = True  # track if every settled leg is void
+            any_void_only = True
             for sel in sels:
                 if sel.result is not None:
                     if sel.result == "lost":
@@ -109,15 +101,12 @@ async def settle_pending() -> List[Dict]:
             if not all_done:
                 continue
 
-            # Decide final status. If literally every leg voided, flag void
-            # rather than falsely marking as won.
             if any_void_only:
                 p.status = "void"
             else:
                 p.status = "won" if won else "lost"
             p.settled_at = datetime.utcnow()
 
-            # Build notification payload
             user = await s.get(User, p.user_id)
             if user:
                 notifications.append({
