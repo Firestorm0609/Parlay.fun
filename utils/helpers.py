@@ -1,4 +1,4 @@
-from typing import Optional, List, Dict
+from typing import Optional
 
 
 def parse_odds(text: str) -> Optional[float]:
@@ -12,7 +12,6 @@ def parse_odds(text: str) -> Optional[float]:
 
 
 def parse_stake(text: str) -> Optional[float]:
-    """Parse a stake amount in 'units'. Accepts e.g. '1', '2.5', '0.5'."""
     try:
         v = float(text.replace(",", ".").strip())
         if v < 0 or v > 100000:
@@ -53,7 +52,6 @@ def format_parlay_message(parlay: dict) -> str:
 
 
 def format_tracking_confirmation(parlay_id: int, parlay: dict, stake: float) -> str:
-    """Confirmation shown after a parlay is saved — includes fixture context."""
     lines = [
         f"✅ *Tracking parlay #{parlay_id}*",
         f"Total Odds: *{parlay['total_odds']}x*",
