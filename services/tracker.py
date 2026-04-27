@@ -1,157 +1,87 @@
+"""
+Auto-settlement engine.
+
+Improvements:
+- Returns rich settlement records (parlay + sels + result) so the notify job
+  can DM users with full context
+- Caches completed events for 1h, in-progress events for 5min
+- Handles 'push' selections (treated as won leg → odds 1.0 contribution)
+"""
+import time
 import logging
-from datetime import datetime
 from typing import List, Dict
-from sqlalchemy import select
 
-from database.db import async_session, Parlay, Selection, User
-from services.espn_api import get_fixture_result
+from services.espn_api import fetch_event_summary
+from services.analytics import _check_selection
+from database.db import (
+    get_pending_parlays, get_selections, update_selection_result,
+    settle_parlay, get_parlay,
+)
 
-logger = logging.getLogger(__name__)
+log = logging.getLogger(__name__)
+
+_event_cache: Dict[str, Dict] = {}  # key -> {data, expires_at}
+_COMPLETED_TTL = 3600
+_LIVE_TTL = 300
 
 
-async def save_parlay(user_id: int, parlay: dict, stake: float = 0) -> int:
-    async with async_session() as s:
-        u = await s.scalar(select(User).where(User.tg_id == user_id))
-        if not u:
-            u = User(tg_id=user_id)
-            s.add(u)
-            await s.flush()
-
-        p = Parlay(
-            user_id=u.id,
-            risk=parlay["risk"],
-            total_odds=parlay["total_odds"],
-            stake=stake or 0,
-            status="pending",
-            created_at=datetime.utcnow(),
-        )
-        s.add(p)
-        await s.flush()
-
-        for leg in parlay["legs"]:
-            sel = Selection(
-                parlay_id=p.id,
-                fixture_id=leg["fixture_id"],
-                home=leg["home"],
-                away=leg["away"],
-                league=leg.get("league", ""),
-                market=leg["market"],
-                pick=leg["pick"],
-                label=leg["label"],
-                odds=leg["odds"],
-                confidence=leg["confidence"],
-                kickoff=leg.get("kickoff"),
-                result=None,
-            )
-            s.add(sel)
-
-        await s.commit()
-        return p.id
+async def _resolve_event(sport: str, event_id: str) -> Dict:
+    key = f"{sport}:{event_id}"
+    now = time.time()
+    cached = _event_cache.get(key)
+    if cached and cached["expires_at"] > now:
+        return cached["data"]
+    data = await fetch_event_summary(sport, event_id)
+    ttl = _COMPLETED_TTL if data.get("completed") else _LIVE_TTL
+    _event_cache[key] = {"data": data, "expires_at": now + ttl}
+    return data
 
 
 async def settle_pending() -> List[Dict]:
-    notifications: List[Dict] = []
+    """
+    Walk every pending parlay, pull its events, mark selections, and settle
+    parlays that are now fully decided.
+    Returns list of settlement records.
+    """
+    parlays = get_pending_parlays()
+    settled: List[Dict] = []
 
-    async with async_session() as s:
-        pending = (await s.execute(
-            select(Parlay).where(Parlay.status == "pending")
-        )).scalars().all()
-
-        result_cache: Dict[str, Dict] = {}
-
-        for p in pending:
-            sels = (await s.execute(
-                select(Selection).where(Selection.parlay_id == p.id)
-            )).scalars().all()
-
-            all_done = True
-            won = True
-            any_void_only = True
-            for sel in sels:
-                if sel.result is not None:
-                    if sel.result == "lost":
-                        won = False
-                        any_void_only = False
-                    elif sel.result == "won":
-                        any_void_only = False
-                    continue
-
-                if sel.fixture_id in result_cache:
-                    res = result_cache[sel.fixture_id]
-                else:
-                    try:
-                        res = await get_fixture_result(sel.fixture_id)
-                    except Exception:
-                        logger.exception("result fetch failed for %s", sel.fixture_id)
-                        res = None
-                    result_cache[sel.fixture_id] = res
-
-                if not res:
-                    all_done = False
-                    continue
-
-                outcome = _check_selection(sel, res)
-                sel.result = outcome
-                if outcome == "lost":
-                    won = False
-                    any_void_only = False
-                elif outcome == "won":
-                    any_void_only = False
-
-            if not all_done:
+    for p in parlays:
+        sels = get_selections(p["id"])
+        results = []
+        for s in sels:
+            if s["result"] != "pending":
+                results.append(s["result"])
                 continue
+            ev = await _resolve_event(p["sport"], s["event_id"])
+            r = _check_selection(s, ev)
+            if r != "pending":
+                update_selection_result(s["id"], r)
+            results.append(r)
 
-            if any_void_only:
-                p.status = "void"
-            else:
-                p.status = "won" if won else "lost"
-            p.settled_at = datetime.utcnow()
+        # Resolve parlay status:
+        # any 'lost' → lost; any 'pending' → pending; else won
+        if "lost" in results:
+            settle_parlay(p["id"], "lost", 0)
+            settled.append({"parlay": get_parlay(p["id"]),
+                            "selections": get_selections(p["id"]),
+                            "status": "lost", "payout": 0.0})
+        elif "pending" in results:
+            continue  # not all legs in yet
+        else:
+            # All wins/pushes: pushes contribute odds 1.0
+            payout = float(p["stake"] or 0) * float(p["total_odds"] or 0)
+            adj_odds = 1.0
+            for s in get_selections(p["id"]):
+                adj_odds *= (s["odds"] if s["result"] == "won" else 1.0)
+            adj_payout = float(p["stake"] or 0) * adj_odds
+            final_payout = round(min(payout, adj_payout) if adj_odds < float(p["total_odds"] or 1)
+                                 else payout, 2)
+            settle_parlay(p["id"], "won", final_payout)
+            settled.append({"parlay": get_parlay(p["id"]),
+                            "selections": get_selections(p["id"]),
+                            "status": "won", "payout": final_payout})
 
-            user = await s.get(User, p.user_id)
-            if user:
-                notifications.append({
-                    "tg_id": user.tg_id,
-                    "notify": bool(user.notify),
-                    "parlay_id": p.id,
-                    "status": p.status,
-                    "total_odds": p.total_odds,
-                    "actual_odds": p.actual_odds,
-                    "stake": p.stake or 0,
-                })
-
-        await s.commit()
-
-    return notifications
-
-
-def _check_selection(sel, result: dict) -> str:
-    hs, as_ = result.get("home_score"), result.get("away_score")
-    if hs is None or as_ is None:
-        return "void"
-
-    m, pick = sel.market, sel.pick
-    if m == "1X2":
-        if pick == "home":
-            return "won" if hs > as_ else "lost"
-        if pick == "away":
-            return "won" if as_ > hs else "lost"
-        if pick == "draw":
-            return "won" if hs == as_ else "lost"
-    if m == "OU":
-        total = hs + as_
-        if pick == "over_2_5":
-            return "won" if total > 2.5 else "lost"
-        if pick == "under_2_5":
-            return "won" if total < 2.5 else "lost"
-    if m == "BTTS":
-        both = hs > 0 and as_ > 0
-        if pick == "yes":
-            return "won" if both else "lost"
-        if pick == "no":
-            return "won" if not both else "lost"
-    if m == "DC":
-        if pick == "1X":
-            return "won" if hs >= as_ else "lost"
-        if pick == "X2":
-            return "won" if as_ >= hs else "lost"
-    return "void"
+    if settled:
+        log.info("Settled %d parlays", len(settled))
+    return settled
