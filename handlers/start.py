@@ -1,69 +1,71 @@
+import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
-from database.db import get_or_create_user
+
+logger = logging.getLogger(__name__)
 
 
-def _main_menu_markup():
-    kb = [
-        [InlineKeyboardButton("🎯 Build Parlay", callback_data="menu_parlay")],
+def _main_menu_text(first_name: str) -> str:
+    return (
+        f"👋 Hey {first_name}!\n\n"
+        f"Welcome to *Parlay.fun* — a smart parlay builder powered by live data.\n\n"
+        f"What I can do:\n"
+        f"• /parlay — build a parlay\n"
+        f"• /today — fixtures today\n"
+        f"• /stats — your record\n"
+        f"• /history — past parlays\n"
+        f"• /leaderboard — top users\n"
+        f"• /challenges — daily missions\n"
+        f"• /settings — preferences\n"
+    )
+
+
+def _main_menu_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("🏆 Challenges", callback_data="menu_challenges"),
-            InlineKeyboardButton("📊 My Stats",   callback_data="menu_stats"),
+            InlineKeyboardButton("🎯 Build Parlay", callback_data="menu:parlay"),
+            InlineKeyboardButton("📅 Today", callback_data="menu:today"),
         ],
         [
-            InlineKeyboardButton("💰 Bankroll",    callback_data="menu_bankroll"),
-            InlineKeyboardButton("⚙️ Risk Profile", callback_data="menu_settings"),
+            InlineKeyboardButton("📊 My Stats", callback_data="menu:stats"),
+            InlineKeyboardButton("🏆 Leaderboard", callback_data="menu:leaderboard"),
         ],
-        [
-            InlineKeyboardButton("👥 Bot Stats", callback_data="menu_botstats"),
-            InlineKeyboardButton("❓ Help",       callback_data="menu_help"),
-        ],
-    ]
-    return InlineKeyboardMarkup(kb)
+    ])
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    await get_or_create_user(user.id, user.username)
+    text = _main_menu_text(user.first_name)
+    keyboard = _main_menu_keyboard()
 
-    text = (
-        f"👋 Welcome, *{user.first_name}*!\n\n"
-        "I'm your *Advanced Parlay & Odds Selector*.\n"
-        "I generate smart parlays using real fixtures, odds analysis, "
-        "and your chosen risk profile.\n\n"
-        "Choose an option below:"
-    )
-    markup = _main_menu_markup()
-    if update.message:
-        await update.message.reply_text(text, parse_mode="Markdown", reply_markup=markup)
+    # Works whether triggered by /start (message) or by a callback_query.
+    if update.message is not None:
+        await update.message.reply_text(
+            text, parse_mode="Markdown", reply_markup=keyboard
+        )
+    elif update.callback_query is not None:
+        try:
+            await update.callback_query.edit_message_text(
+                text, parse_mode="Markdown", reply_markup=keyboard
+            )
+        except Exception:
+            await update.callback_query.message.reply_text(
+                text, parse_mode="Markdown", reply_markup=keyboard
+            )
+
+
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await start(update, context)
+
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    target = query.data.split(":", 1)[1]
+    if target == "parlay":
+        from handlers.parlay import parlay_start
+        await parlay_start(update, context)
+    elif target == "main":
+        await start(update, context)
     else:
-        await update.callback_query.edit_message_text(
-            text, parse_mode="Markdown", reply_markup=markup)
-
-
-async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (
-        "❓ *How to Use Parlay.fun*\n\n"
-        "🎯 *Build Parlay* — Choose target odds, get smart selections\n"
-        "🏆 *Challenges* — Rollover & longshot multi-stage challenges\n"
-        "📊 *My Stats* — Win rate, profit, ROI & history\n"
-        "💰 *Bankroll* — Set and track your balance (custom amounts supported)\n"
-        "⚙️ *Risk Profile* — Safe / Balanced / Aggressive\n"
-        "👥 *Bot Stats* — See how many users are online & total registered\n\n"
-        "*Markets:* 1X2 · Double Chance · Over/Under · BTTS\n"
-        "*Data Source:* ESPN fixtures + DraftKings odds\n\n"
-        "💡 _Tip: Higher target odds = more legs = more risk._\n"
-        "💡 _Profit protection locks 30% of winnings automatically._"
-    )
-    kb = [
-        [
-            InlineKeyboardButton("👥 Bot Stats", callback_data="menu_botstats"),
-            InlineKeyboardButton("🏠 Main Menu", callback_data="menu_main"),
-        ]
-    ]
-    markup = InlineKeyboardMarkup(kb)
-    if update.callback_query:
-        await update.callback_query.edit_message_text(
-            text, parse_mode="Markdown", reply_markup=markup)
-    else:
-        await update.message.reply_text(text, parse_mode="Markdown", reply_markup=markup)
+        await query.edit_message_text(f"Use /{target} to access this section.")
