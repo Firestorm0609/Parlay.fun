@@ -40,7 +40,6 @@ async def get_today_fixtures() -> List[Dict]:
 
 
 async def get_fixture_result(fixture_id: str) -> Optional[Dict]:
-    """Fetch a single fixture's result via ESPN's summary endpoint."""
     url = f"https://site.api.espn.com/apis/site/v2/sports/soccer/all/summary?event={fixture_id}"
     async with httpx.AsyncClient(timeout=15) as client:
         try:
