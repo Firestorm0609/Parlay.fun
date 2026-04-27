@@ -1,84 +1,69 @@
-import aiohttp
-import asyncio
-from config import ESPN_BASE, LEAGUES
+import logging
+from datetime import datetime
+from typing import List, Dict, Optional
+import httpx
 
-_TIMEOUT = aiohttp.ClientTimeout(total=15)
+logger = logging.getLogger(__name__)
+
+SCOREBOARD_URL = "https://site.api.espn.com/apis/site/v2/sports/soccer/all/scoreboard"
 
 
-class ESPNClient:
-    def __init__(self):
-        self.session = None
-
-    async def _get_session(self):
-        if not self.session or self.session.closed:
-            self.session = aiohttp.ClientSession(timeout=_TIMEOUT)
-        return self.session
-
-    async def close(self):
-        if self.session and not self.session.closed:
-            await self.session.close()
-
-    async def fetch_scoreboard(self, league: str, date: str = None):
-        """Fetch fixtures + odds from ESPN. date format: YYYYMMDD"""
-        url = ESPN_BASE.format(league=league)
-        params = {"dates": date} if date else {}
-        session = await self._get_session()
+async def get_today_fixtures() -> List[Dict]:
+    today = datetime.utcnow().strftime("%Y%m%d")
+    url = f"{SCOREBOARD_URL}?dates={today}"
+    async with httpx.AsyncClient(timeout=15) as client:
         try:
-            async with session.get(url, params=params) as r:
-                if r.status != 200:
-                    return None
-                return await r.json()
-        except Exception:
-            return None
-
-    async def fetch_all_leagues(self, date: str = None, leagues=None):
-        leagues = leagues or list(LEAGUES.keys())
-        tasks = [self.fetch_scoreboard(lg, date) for lg in leagues]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        return dict(zip(leagues, results))
-
-    @staticmethod
-    def parse_events(raw, league_code):
-        """Extract normalized fixture data with odds."""
-        if not raw or "events" not in raw:
+            r = await client.get(url)
+            r.raise_for_status()
+            data = r.json()
+        except Exception as e:
+            logger.error("espn fetch failed: %s", e)
             return []
 
-        fixtures = []
-        for event in raw["events"]:
-            try:
-                comp = event["competitions"][0]
-                competitors = comp["competitors"]
-                home = next(c for c in competitors if c["homeAway"] == "home")
-                away = next(c for c in competitors if c["homeAway"] == "away")
+    fixtures = []
+    for ev in data.get("events", []):
+        try:
+            comp = ev["competitions"][0]
+            home = next(c for c in comp["competitors"] if c["homeAway"] == "home")
+            away = next(c for c in comp["competitors"] if c["homeAway"] == "away")
+            fixtures.append({
+                "id": ev["id"],
+                "home": home["team"]["displayName"],
+                "away": away["team"]["displayName"],
+                "league": ev.get("league", {}).get("name") or comp.get("league", {}).get("name", ""),
+                "kickoff": ev.get("date"),
+                "status": comp.get("status", {}).get("type", {}).get("state"),
+            })
+        except (KeyError, StopIteration):
+            continue
+    return fixtures
 
-                fixture = {
-                    "id": event["id"],
-                    "league": league_code,
-                    "date": event["date"],
-                    "status": event["status"]["type"]["state"],
-                    "home_team": home["team"]["displayName"],
-                    "away_team": away["team"]["displayName"],
-                    "home_score": int(home.get("score", 0) or 0),
-                    "away_score": int(away.get("score", 0) or 0),
-                    "home_form": home.get("form", ""),
-                    "away_form": away.get("form", ""),
-                    "venue": comp.get("venue", {}).get("fullName", ""),
-                    "odds": None,
-                }
 
-                if comp.get("odds"):
-                    o = comp["odds"][0]
-                    fixture["odds"] = {
-                        "details":    o.get("details", ""),
-                        "over_under": o.get("overUnder"),
-                        "spread":     o.get("spread"),
-                        "home_ml":    o.get("homeTeamOdds", {}).get("moneyLine"),
-                        "away_ml":    o.get("awayTeamOdds", {}).get("moneyLine"),
-                        "draw_odds":  o.get("drawOdds", {}).get("moneyLine") if o.get("drawOdds") else None,
-                        "provider":   o.get("provider", {}).get("name", "DraftKings"),
-                    }
-                fixtures.append(fixture)
-            except Exception:
-                continue
-        return fixtures
+async def get_fixture_result(fixture_id: str) -> Optional[Dict]:
+    """Fetch a single fixture's result via ESPN's summary endpoint."""
+    url = f"https://site.api.espn.com/apis/site/v2/sports/soccer/all/summary?event={fixture_id}"
+    async with httpx.AsyncClient(timeout=15) as client:
+        try:
+            r = await client.get(url)
+            r.raise_for_status()
+            data = r.json()
+        except Exception as e:
+            logger.error("espn summary fetch failed for %s: %s", fixture_id, e)
+            return None
 
+    try:
+        header = data.get("header", {})
+        comp = header["competitions"][0]
+        status = comp.get("status", {}).get("type", {}).get("state")
+        if status != "post":
+            return None
+        home = next(c for c in comp["competitors"] if c["homeAway"] == "home")
+        away = next(c for c in comp["competitors"] if c["homeAway"] == "away")
+        return {
+            "fixture_id": fixture_id,
+            "home_score": int(home.get("score", 0)),
+            "away_score": int(away.get("score", 0)),
+            "status": status,
+        }
+    except (KeyError, StopIteration, ValueError):
+        return None
