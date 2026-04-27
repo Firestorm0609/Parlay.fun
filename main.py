@@ -1,127 +1,131 @@
 import logging
 import os
+from datetime import time as dtime
+
+from telegram import Update
 from telegram.ext import (
-    Application,
-    CommandHandler,
-    CallbackQueryHandler,
-    MessageHandler,
-    ContextTypes,
-    filters,
+    Application, CommandHandler, CallbackQueryHandler,
+    MessageHandler, filters, ContextTypes,
 )
+from dotenv import load_dotenv
 
-from database.db import init_db
-from handlers.start import start, help_cmd, button_handler
+from database.db import (
+    init_db, get_user, get_unnotified_settled_parlays, mark_parlay_notified,
+)
+from handlers.start import start, help_command, quick_callback
 from handlers.parlay import (
-    parlay_start,
-    parlay_callback,
-    track_callback,
-    handle_odds_input,
+    parlay_command, sport_callback, market_callback, riskmode_callback,
+    refresh_callback, track_callback, stake_callback,
+    oddsinput_handler, refresh_oddsinput_handler, stake_input_handler,
+    history_command,
 )
-from handlers.analytics import stats, history, leaderboard, today
-from handlers.challenges import challenges, challenge_callback
-from handlers.settings import settings_cmd, settings_callback
-from handlers.admin import broadcast
-from services.tracker import settle_pending
+from handlers.settings import (
+    settings_command, prefs_callback, units_input_handler,
+)
+from handlers.analytics import stats_command, leaderboard_command
+from handlers.challenges import challenge_command, accept_challenge
+from handlers.admin import broadcast_command, stats_admin
 
+from services.tracker import settle_pending
+from utils.helpers import format_settlement_message
+
+load_dotenv()
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     level=logging.INFO,
 )
-logger = logging.getLogger(__name__)
+log = logging.getLogger("parlay")
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
-SETTLE_INTERVAL = int(os.getenv("SETTLE_INTERVAL", "3600"))
-
-
-async def auto_settle_job(context: ContextTypes.DEFAULT_TYPE):
-    """Periodic job: settle pending parlays and notify owners."""
+# ─── Periodic jobs ─────────────────────────────────────────────
+async def auto_settle_job(ctx: ContextTypes.DEFAULT_TYPE):
+    """Settle pending parlays from ESPN scores; DM users their results."""
     try:
-        results = await settle_pending()
+        settled = await settle_pending()
     except Exception:
-        logger.exception("settle_pending crashed")
+        log.exception("settle_pending crashed")
         return
 
-    if not results:
+    if not settled:
         return
+    log.info("Auto-settle: %d parlays settled", len(settled))
 
-    for item in results:
-        if not item.get("notify", True):
+    # Notify users (only those with notifications enabled)
+    pending_notify = get_unnotified_settled_parlays()
+    by_id = {r["parlay"]["id"]: r for r in settled}
+    for p in pending_notify:
+        rec = by_id.get(p["id"])
+        if not rec:
+            # Already known but maybe missed cache; rebuild minimally
+            rec = {"parlay": p, "selections": [], "status": p["status"],
+                   "payout": p["actual_payout"]}
+        user = get_user(p["user_id"]) or {}
+        if not user.get("notifications", 1):
+            mark_parlay_notified(p["id"])
             continue
-        tg_id = item.get("tg_id")
-        if not tg_id:
-            continue
-
-        status = item["status"]
-        odds = item.get("actual_odds") or item.get("total_odds") or 0
-        stake = item.get("stake") or 0
-        if status == "won":
-            profit = round((odds - 1) * stake, 2) if stake else 0
-            text = (
-                f"✅ *Parlay #{item['parlay_id']} WON!*\n"
-                f"Odds: *{odds}x*"
-            )
-            if stake:
-                text += f"\nStake: {stake}u → Profit: *+{profit}u*"
-        elif status == "lost":
-            text = (
-                f"❌ *Parlay #{item['parlay_id']} lost.*\n"
-                f"Odds: {odds}x"
-            )
-            if stake:
-                text += f"\nStake: -{stake}u"
-        else:
-            continue
-
         try:
-            await context.bot.send_message(
-                chat_id=tg_id, text=text, parse_mode="Markdown"
-            )
+            text = format_settlement_message(rec)
+            await ctx.bot.send_message(p["user_id"], text, parse_mode="Markdown")
         except Exception as e:
-            logger.warning("notify failed for %s: %s", tg_id, e)
+            log.warning("Couldn't DM user %s: %s", p["user_id"], e)
+        finally:
+            mark_parlay_notified(p["id"])
+
+
+async def post_init(app: Application):
+    init_db()
+    log.info("Database initialized")
+    # Schedule the auto-settle job (hourly)
+    interval = int(os.getenv("SETTLE_INTERVAL_SECONDS", "3600"))
+    app.job_queue.run_repeating(auto_settle_job, interval=interval, first=20)
+    log.info("Auto-settle job scheduled every %ds", interval)
 
 
 def main():
     token = os.getenv("BOT_TOKEN")
     if not token:
-        raise RuntimeError("BOT_TOKEN env var required")
+        raise SystemExit("BOT_TOKEN missing in environment / .env")
 
-    app = Application.builder().token(token).build()
+    app = (Application.builder()
+           .token(token)
+           .post_init(post_init)
+           .build())
 
-    init_db()
-
+    # ── Commands ────────────────────────────────────────────────
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(CommandHandler("parlay", parlay_start))
-    app.add_handler(CommandHandler("stats", stats))
-    app.add_handler(CommandHandler("history", history))
-    app.add_handler(CommandHandler("leaderboard", leaderboard))
-    app.add_handler(CommandHandler("today", today))
-    app.add_handler(CommandHandler("challenges", challenges))
-    app.add_handler(CommandHandler("settings", settings_cmd))
-    app.add_handler(CommandHandler("broadcast", broadcast))
+    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("parlay", parlay_command))
+    app.add_handler(CommandHandler("settings", settings_command))
+    app.add_handler(CommandHandler("stats", stats_command))
+    app.add_handler(CommandHandler("history", history_command))
+    app.add_handler(CommandHandler("leaderboard", leaderboard_command))
+    app.add_handler(CommandHandler("challenge", challenge_command))
+    app.add_handler(CommandHandler("broadcast", broadcast_command))
+    app.add_handler(CommandHandler("admin", stats_admin))
+    # legacy odds/units commands
+    app.add_handler(CommandHandler("odds", oddsinput_handler))
+    app.add_handler(CommandHandler("units", units_input_handler))
 
-    app.add_handler(CallbackQueryHandler(button_handler, pattern=r"^(menu|help)"))
-    app.add_handler(CallbackQueryHandler(parlay_callback, pattern=r"^parlay:"))
-    app.add_handler(CallbackQueryHandler(track_callback, pattern=r"^track:"))
-    app.add_handler(CallbackQueryHandler(challenge_callback, pattern=r"^challenge:"))
-    app.add_handler(CallbackQueryHandler(settings_callback, pattern=r"^settings:"))
+    # ── Callback queries ────────────────────────────────────────
+    app.add_handler(CallbackQueryHandler(quick_callback,    pattern=r"^quick:"))
+    app.add_handler(CallbackQueryHandler(sport_callback,    pattern=r"^sport:"))
+    app.add_handler(CallbackQueryHandler(market_callback,   pattern=r"^market:"))
+    app.add_handler(CallbackQueryHandler(riskmode_callback, pattern=r"^risk:"))
+    app.add_handler(CallbackQueryHandler(refresh_callback,  pattern=r"^refresh:"))
+    app.add_handler(CallbackQueryHandler(track_callback,    pattern=r"^track:"))
+    app.add_handler(CallbackQueryHandler(stake_callback,    pattern=r"^stake:"))
+    app.add_handler(CallbackQueryHandler(prefs_callback,    pattern=r"^pref:"))
+    app.add_handler(CallbackQueryHandler(accept_challenge,  pattern=r"^chal:"))
 
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_odds_input))
+    # ── Free-text handlers ──────────────────────────────────────
+    # Order matters: stake/units handlers check their own awaiting_* flags first.
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, stake_input_handler), group=0)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, units_input_handler), group=1)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, refresh_oddsinput_handler), group=2)
 
-    if app.job_queue is not None:
-        app.job_queue.run_repeating(
-            auto_settle_job,
-            interval=SETTLE_INTERVAL,
-            first=60,
-            name="auto_settle",
-        )
-    else:
-        logger.warning(
-            "JobQueue not available — install python-telegram-bot[job-queue]. "
-            "Auto-settlement disabled."
-        )
-
-    app.run_polling()
+    log.info("Bot starting...")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
