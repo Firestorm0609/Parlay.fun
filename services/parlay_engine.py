@@ -1,84 +1,104 @@
-from itertools import combinations
-from datetime import datetime
-from services.espn_api import ESPNClient
-from services.analytics import evaluate_market
-from config import RISK_LEVELS, LEAGUES
+import hashlib
+import time
+from typing import List, Dict, Optional
+
+from services.espn_api import get_today_fixtures
+from services.analytics import analyse_fixture
 
 
-class ParlayEngine:
-    def __init__(self):
-        self.client = ESPNClient()
+RISK_PROFILES = {
+    "safe": {"min_conf": 75, "max_odds": 1.8, "target_total": 2.5},
+    "balanced": {"min_conf": 60, "max_odds": 3.0, "target_total": 5.0},
+    "risky": {"min_conf": 45, "max_odds": 6.0, "target_total": 15.0},
+}
 
-    async def gather_selections(self, date: str = None, markets=None):
-        markets = markets or ["1X2", "OU", "BTTS"]
-        raw = await self.client.fetch_all_leagues(date)
-        all_selections = []
 
-        for league_code, data in raw.items():
-            if isinstance(data, Exception) or not data:
+# Friendly labels for UI buttons
+MARKET_LABELS = {
+    "1X2": "Win",
+    "DC": "Win or Draw",
+    "OU": "Goals",
+    "BTTS": "BTTS",
+    "ANY": "Any",
+}
+
+
+async def gather_selections(markets: Optional[List[str]] = None) -> List[Dict]:
+    fixtures = await get_today_fixtures()
+    if not fixtures:
+        return []
+
+    selections = []
+    for fx in fixtures:
+        analysis = analyse_fixture(fx)
+        for sel in analysis:
+            if markets and sel["market"] not in markets:
                 continue
-            fixtures = ESPNClient.parse_events(data, league_code)
-            for fx in fixtures:
-                if fx["status"] != "pre":
-                    continue
-                for m in markets:
-                    all_selections.extend(evaluate_market(fx, m))
-        return all_selections
-
-    def build_parlay(self, selections, target_odds, risk="balanced", tolerance=0.15):
-        """Find a combination of selections close to target_odds."""
-        cfg = RISK_LEVELS[risk]
-        # Filter by criteria
-        pool = [
-            s for s in selections
-            if s["probability"] >= cfg["min_prob"]
-            and s["odds"] <= cfg["max_odds_per_leg"]
-            and s["confidence"] >= 40
-        ]
-        # Sort by confidence
-        pool.sort(key=lambda x: x["confidence"], reverse=True)
-        # Trim pool to keep combinatorics manageable
-        pool = pool[:40]
-
-        # Avoid same fixture twice
-        best = None
-        best_diff = float("inf")
-        max_legs = cfg["max_legs"]
-
-        target_min = target_odds * (1 - tolerance)
-        target_max = target_odds * (1 + tolerance)
-
-        for n in range(1, max_legs + 1):
-            for combo in combinations(pool, n):
-                fids = [s["fixture"]["id"] for s in combo]
-                if len(set(fids)) != len(fids):
-                    continue
-                total = 1.0
-                for s in combo:
-                    total *= s["odds"]
-                if target_min <= total <= target_max:
-                    # score: prefer higher avg confidence + closer to target
-                    avg_conf = sum(s["confidence"] for s in combo) / len(combo)
-                    diff = abs(total - target_odds) / target_odds - (avg_conf / 1000)
-                    if diff < best_diff:
-                        best_diff = diff
-                        best = {
-                            "selections": list(combo),
-                            "total_odds": round(total, 2),
-                            "avg_confidence": round(avg_conf, 1),
-                            "combined_probability": _combined_prob(combo),
-                        }
-            if best and n >= 2:
-                # good enough, stop early to save CPU
-                break
-        return best
-
-    async def close(self):
-        await self.client.close()
+            selections.append({
+                "fixture_id": fx["id"],
+                "home": fx["home"],
+                "away": fx["away"],
+                "league": fx["league"],
+                "kickoff": fx["kickoff"],
+                **sel,
+            })
+    return selections
 
 
-def _combined_prob(combo):
-    p = 1.0
-    for s in combo:
-        p *= s["probability"]
-    return round(p, 4)
+async def build_parlay(
+    legs: int,
+    risk: str,
+    markets: Optional[List[str]] = None,
+) -> Dict:
+    """Build a parlay.
+
+    Args:
+        legs: number of selections (2..6)
+        risk: "safe" | "balanced" | "risky"
+        markets: optional list of market codes to restrict to, e.g. ["1X2", "DC"].
+                 None or empty means no restriction.
+    """
+    profile = RISK_PROFILES.get(risk, RISK_PROFILES["balanced"])
+
+    # Treat empty list / "ANY" sentinel as no filter
+    if markets and "ANY" in markets:
+        markets = None
+
+    selections = await gather_selections(markets=markets)
+
+    selections = [
+        s for s in selections
+        if s["confidence"] >= profile["min_conf"]
+        and s["odds"] <= profile["max_odds"]
+    ]
+    selections.sort(key=lambda x: x["confidence"], reverse=True)
+
+    used_fixtures = set()
+    chosen = []
+    for sel in selections:
+        if sel["fixture_id"] in used_fixtures:
+            continue
+        chosen.append(sel)
+        used_fixtures.add(sel["fixture_id"])
+        if len(chosen) == legs:
+            break
+
+    if len(chosen) < legs:
+        return {}
+
+    total_odds = 1.0
+    for c in chosen:
+        total_odds *= c["odds"]
+
+    cache_id = hashlib.md5(
+        f"{time.time()}:{legs}:{risk}:{markets}".encode()
+    ).hexdigest()[:10]
+
+    return {
+        "cache_id": cache_id,
+        "legs": chosen,
+        "total_odds": round(total_odds, 2),
+        "risk": risk,
+        "markets": markets or ["ANY"],
+        "target_total": profile["target_total"],
+    }
