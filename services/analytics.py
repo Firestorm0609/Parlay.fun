@@ -6,9 +6,8 @@ TEAM_STRENGTH_DEFAULT = 0.5
 
 
 def _team_strength(team: str) -> float:
-    # deterministic pseudo-rating from team name so demos are stable
     h = sum(ord(c) for c in team) % 100
-    return 0.35 + (h / 100) * 0.5  # 0.35 .. 0.85
+    return 0.35 + (h / 100) * 0.5
 
 
 def _poisson_pmf(lmbda: float, k: int) -> float:
@@ -16,7 +15,6 @@ def _poisson_pmf(lmbda: float, k: int) -> float:
 
 
 def _match_probs(home_str: float, away_str: float) -> Dict[str, float]:
-    # expected goals per side — small home advantage baked in
     home_xg = 1.1 + home_str * 1.4
     away_xg = 0.8 + away_str * 1.2
 
@@ -49,7 +47,6 @@ def _odds_from_prob(p: float, vig: float = 0.05) -> float:
 
 
 def _confidence(prob: float, odds: float, edge_bias: float = 0.0) -> int:
-    # 0..100
     base = prob * 100
     edge = (prob * odds - 1) * 30
     score = base + edge + edge_bias
@@ -63,7 +60,6 @@ def analyse_fixture(fx: Dict) -> List[Dict]:
 
     selections = []
 
-    # ---------------- 1X2 ----------------
     home_odds = _odds_from_prob(probs["home"])
     draw_odds = _odds_from_prob(probs["draw"])
     away_odds = _odds_from_prob(probs["away"])
@@ -96,7 +92,6 @@ def analyse_fixture(fx: Dict) -> List[Dict]:
             "confidence": _confidence(probs["draw"], draw_odds, 0),
         })
 
-    # ---------------- Double Chance ----------------
     p_1x = probs["home"] + probs["draw"]
     p_x2 = probs["away"] + probs["draw"]
     if p_1x >= 0.62:
@@ -120,11 +115,8 @@ def analyse_fixture(fx: Dict) -> List[Dict]:
             "confidence": _confidence(p_x2, odds, 4),
         })
 
-    # ---------------- Over / Under 2.5 ----------------
     expected_goals = probs["home_xg"] + probs["away_xg"]
-    over_prob = 1 - sum(
-        _poisson_pmf(expected_goals, k) for k in range(0, 3)
-    )
+    over_prob = 1 - sum(_poisson_pmf(expected_goals, k) for k in range(0, 3))
     over_prob = max(0.05, min(0.95, over_prob))
     under_prob = 1 - over_prob
     if over_prob >= 0.55:
@@ -148,13 +140,9 @@ def analyse_fixture(fx: Dict) -> List[Dict]:
             "confidence": _confidence(under_prob, odds, 3),
         })
 
-    # ---------------- BTTS ----------------
-    # Derive BTTS from Poisson directly: P(home>=1) * P(away>=1)
     p_home_scores = 1 - _poisson_pmf(probs["home_xg"], 0)
     p_away_scores = 1 - _poisson_pmf(probs["away_xg"], 0)
     btts_yes = p_home_scores * p_away_scores
-    # Light blend with attack heuristic so demo team strengths still matter,
-    # but anchored to a realistic ~55% baseline rather than 45%.
     attack_factor = (home_str + away_str) / 2
     btts_yes = 0.6 * btts_yes + 0.4 * (0.55 + (attack_factor - 0.5) * 0.20)
     btts_yes = max(0.25, min(0.85, btts_yes))
