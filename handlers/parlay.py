@@ -14,7 +14,6 @@ from utils.helpers import (
 logger = logging.getLogger(__name__)
 
 
-# ----- Step 1: choose number of legs -----
 async def parlay_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [
@@ -45,7 +44,6 @@ async def parlay_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     data = query.data.split(":")
 
-    # parlay:legs:<N>  -> ask for risk
     if data[1] == "legs":
         legs = int(data[2])
         keyboard = [
@@ -62,7 +60,6 @@ async def parlay_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # parlay:risk:<N>:<risk>  -> ask for market filter
     if data[1] == "risk":
         legs = int(data[2])
         risk = data[3]
@@ -86,7 +83,6 @@ async def parlay_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # parlay:mkt:<N>:<risk>:<market>  -> build it
     if data[1] == "mkt":
         legs = int(data[2])
         risk = data[3]
@@ -137,13 +133,11 @@ async def parlay_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
 
-# ----- Tracking flow -----
 async def track_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data.split(":")
 
-    # track:save:<cache_id>  -> ask for stake
     if data[1] == "save":
         cache_id = data[2]
         cache = context.bot_data.get("parlay_cache", {}).get(cache_id)
@@ -151,7 +145,6 @@ async def track_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("⚠️ Parlay expired. Build a new one with /parlay.")
             return
 
-        # Offer quick-pick stakes + custom
         keyboard = [
             [
                 InlineKeyboardButton("0u (track only)", callback_data=f"track:stake:{cache_id}:0"),
@@ -171,7 +164,6 @@ async def track_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # track:custom:<cache_id>  -> wait for typed stake
     if data[1] == "custom":
         cache_id = data[2]
         cache = context.bot_data.get("parlay_cache", {}).get(cache_id)
@@ -185,7 +177,6 @@ async def track_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # track:stake:<cache_id>:<amount>  -> persist
     if data[1] == "stake":
         cache_id = data[2]
         try:
@@ -195,7 +186,6 @@ async def track_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _persist_parlay(update, context, cache_id, stake, edit=True)
         return
 
-    # track:odds:<parlay_id>  -> log actual odds taken later
     if data[1] == "odds":
         parlay_id = int(data[2])
         context.user_data["awaiting_odds"] = parlay_id
@@ -205,13 +195,7 @@ async def track_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
 
-async def _persist_parlay(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    cache_id: str,
-    stake: float,
-    edit: bool,
-):
+async def _persist_parlay(update, context, cache_id, stake, edit):
     cache = context.bot_data.get("parlay_cache", {}).get(cache_id)
     if not cache:
         msg = "⚠️ Parlay expired. Build a new one with /parlay."
@@ -241,7 +225,6 @@ async def _persist_parlay(
         )
     ]]
 
-    # cache_id is single-use; clean up so re-clicks don't double-save
     context.bot_data.get("parlay_cache", {}).pop(cache_id, None)
 
     if edit and update.callback_query:
@@ -258,15 +241,12 @@ async def _persist_parlay(
         )
 
 
-# ----- Free-text input router (stake & odds) -----
 async def handle_odds_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Stake first (typed via Custom)
     if "awaiting_stake" in context.user_data:
         cache_id = context.user_data.pop("awaiting_stake")
         text = update.message.text.strip()
         stake = parse_stake(text)
         if stake is None:
-            # put it back so they can retry
             context.user_data["awaiting_stake"] = cache_id
             await update.message.reply_text(
                 "❌ Invalid stake. Send a number like `1`, `2.5` or `0`.",
@@ -276,7 +256,6 @@ async def handle_odds_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _persist_parlay(update, context, cache_id, stake, edit=False)
         return
 
-    # Actual odds for an already-saved parlay
     if "awaiting_odds" in context.user_data:
         parlay_id = context.user_data.pop("awaiting_odds")
         text = update.message.text.strip()
@@ -288,9 +267,8 @@ async def handle_odds_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        from sqlalchemy import update as sql_update
+        from sqlalchemy import update as sql_update, select
         from database.db import async_session, Parlay, User
-        from sqlalchemy import select
 
         uid = update.effective_user.id
         async with async_session() as s:
@@ -298,7 +276,6 @@ async def handle_odds_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not u:
                 await update.message.reply_text("❌ User not found.")
                 return
-            # ensure ownership
             p = await s.scalar(
                 select(Parlay).where(Parlay.id == parlay_id, Parlay.user_id == u.id)
             )
@@ -318,5 +295,4 @@ async def handle_odds_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Otherwise: ignore (it's a normal message)
     return
