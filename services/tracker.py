@@ -1,4 +1,5 @@
 from sqlalchemy import select
+from sqlalchemy.orm.attributes import flag_modified
 from datetime import datetime
 from database.db import SessionLocal, Parlay, User
 from services.espn_api import ESPNClient
@@ -62,6 +63,7 @@ class ParlayTracker:
                         any_lost = True
                     updated.append(sel)
                 parlay.selections = updated
+                flag_modified(parlay, "selections")
                 if any_lost:
                     parlay.status = "lost"
                     parlay.settled_at = datetime.utcnow()
