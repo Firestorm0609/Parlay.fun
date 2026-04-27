@@ -1,125 +1,84 @@
-"""
-ESPN public scoreboard / summary client.
-
-Upgrades vs original:
-- Retries with exponential backoff
-- Returns normalized event summaries for the tracker
-- Soccer covers multiple major leagues (EPL, La Liga, Serie A, UCL, MLS)
-- Optional log warnings on persistent failures
-"""
+import aiohttp
 import asyncio
-import logging
-from datetime import datetime, timedelta
-from typing import List, Dict, Any
+from config import ESPN_BASE, LEAGUES
 
-import httpx
-
-log = logging.getLogger(__name__)
-
-ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports"
-
-# A sport may map to multiple ESPN league paths; we merge their scoreboards.
-SPORT_PATHS = {
-    "soccer": [
-        "soccer/eng.1",      # Premier League
-        "soccer/esp.1",      # La Liga
-        "soccer/ita.1",      # Serie A
-        "soccer/ger.1",      # Bundesliga
-        "soccer/fra.1",      # Ligue 1
-        "soccer/uefa.champions",
-        "soccer/usa.1",      # MLS
-    ],
-    "basketball": ["basketball/nba"],
-    "football":   ["football/nfl"],
-    "baseball":   ["baseball/mlb"],
-    "hockey":     ["hockey/nhl"],
-}
+_TIMEOUT = aiohttp.ClientTimeout(total=15)
 
 
-async def _get_json(url: str, params: Dict[str, Any] = None, retries: int = 3) -> Dict[str, Any]:
-    delay = 0.7
-    last_err = None
-    for attempt in range(retries):
+class ESPNClient:
+    def __init__(self):
+        self.session = None
+
+    async def _get_session(self):
+        if not self.session or self.session.closed:
+            self.session = aiohttp.ClientSession(timeout=_TIMEOUT)
+        return self.session
+
+    async def close(self):
+        if self.session and not self.session.closed:
+            await self.session.close()
+
+    async def fetch_scoreboard(self, league: str, date: str = None):
+        """Fetch fixtures + odds from ESPN. date format: YYYYMMDD"""
+        url = ESPN_BASE.format(league=league)
+        params = {"dates": date} if date else {}
+        session = await self._get_session()
         try:
-            async with httpx.AsyncClient(timeout=20, follow_redirects=True) as cli:
-                r = await cli.get(url, params=params or {})
-                r.raise_for_status()
-                return r.json()
-        except Exception as e:
-            last_err = e
-            if attempt < retries - 1:
-                await asyncio.sleep(delay)
-                delay *= 2
-    log.warning("ESPN GET failed (%s) %s params=%s", last_err, url, params)
-    return {}
+            async with session.get(url, params=params) as r:
+                if r.status != 200:
+                    return None
+                return await r.json()
+        except Exception:
+            return None
 
+    async def fetch_all_leagues(self, date: str = None, leagues=None):
+        leagues = leagues or list(LEAGUES.keys())
+        tasks = [self.fetch_scoreboard(lg, date) for lg in leagues]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        return dict(zip(leagues, results))
 
-async def fetch_scoreboard(sport: str, days_ahead: int = 2) -> List[Dict]:
-    paths = SPORT_PATHS.get(sport, [])
-    if not paths:
-        return []
-    d1 = datetime.utcnow().strftime("%Y%m%d")
-    d2 = (datetime.utcnow() + timedelta(days=days_ahead)).strftime("%Y%m%d")
-    params = {"dates": f"{d1}-{d2}"} if days_ahead else {}
+    @staticmethod
+    def parse_events(raw, league_code):
+        """Extract normalized fixture data with odds."""
+        if not raw or "events" not in raw:
+            return []
 
-    tasks = [_get_json(f"{ESPN_BASE}/{p}/scoreboard", params) for p in paths]
-    results = await asyncio.gather(*tasks)
-    events: List[Dict] = []
-    for j in results:
-        for ev in j.get("events", []) or []:
-            events.append(ev)
-    return events
+        fixtures = []
+        for event in raw["events"]:
+            try:
+                comp = event["competitions"][0]
+                competitors = comp["competitors"]
+                home = next(c for c in competitors if c["homeAway"] == "home")
+                away = next(c for c in competitors if c["homeAway"] == "away")
 
+                fixture = {
+                    "id": event["id"],
+                    "league": league_code,
+                    "date": event["date"],
+                    "status": event["status"]["type"]["state"],
+                    "home_team": home["team"]["displayName"],
+                    "away_team": away["team"]["displayName"],
+                    "home_score": int(home.get("score", 0) or 0),
+                    "away_score": int(away.get("score", 0) or 0),
+                    "home_form": home.get("form", ""),
+                    "away_form": away.get("form", ""),
+                    "venue": comp.get("venue", {}).get("fullName", ""),
+                    "odds": None,
+                }
 
-async def fetch_event_summary_raw(sport: str, event_id: str) -> Dict:
-    """ESPN summary payload (raw)."""
-    paths = SPORT_PATHS.get(sport, [])
-    for p in paths:
-        url = f"{ESPN_BASE}/{p}/summary"
-        data = await _get_json(url, {"event": event_id}, retries=2)
-        if data and (data.get("header") or data.get("boxscore")):
-            return data
-    return {}
+                if comp.get("odds"):
+                    o = comp["odds"][0]
+                    fixture["odds"] = {
+                        "details":    o.get("details", ""),
+                        "over_under": o.get("overUnder"),
+                        "spread":     o.get("spread"),
+                        "home_ml":    o.get("homeTeamOdds", {}).get("moneyLine"),
+                        "away_ml":    o.get("awayTeamOdds", {}).get("moneyLine"),
+                        "draw_odds":  o.get("drawOdds", {}).get("moneyLine") if o.get("drawOdds") else None,
+                        "provider":   o.get("provider", {}).get("name", "DraftKings"),
+                    }
+                fixtures.append(fixture)
+            except Exception:
+                continue
+        return fixtures
 
-
-async def fetch_event_summary(sport: str, event_id: str) -> Dict:
-    """Normalized summary used by the settlement engine."""
-    data = await fetch_event_summary_raw(sport, event_id)
-    if not data:
-        return {}
-    header = data.get("header") or {}
-    competitions = header.get("competitions") or [{}]
-    comp = competitions[0]
-    competitors = comp.get("competitors", [])
-    home = next((c for c in competitors if c.get("homeAway") == "home"), {})
-    away = next((c for c in competitors if c.get("homeAway") == "away"), {})
-    status = (header.get("status") or {}).get("type") or {}
-    return {
-        "id": event_id,
-        "home": (home.get("team") or {}).get("displayName"),
-        "away": (away.get("team") or {}).get("displayName"),
-        "home_score": home.get("score"),
-        "away_score": away.get("score"),
-        "completed": status.get("completed", False),
-        "state": status.get("state", "pre"),
-    }
-
-
-def parse_event(ev: Dict) -> Dict:
-    """Reduce ESPN scoreboard event → clean dict."""
-    comp = (ev.get("competitions") or [{}])[0]
-    competitors = comp.get("competitors", [])
-    home = next((c for c in competitors if c.get("homeAway") == "home"), {})
-    away = next((c for c in competitors if c.get("homeAway") == "away"), {})
-    status = (ev.get("status") or {}).get("type") or {}
-    return {
-        "id": ev.get("id"),
-        "name": ev.get("name") or ev.get("shortName") or "Unknown",
-        "date": ev.get("date"),
-        "status": status.get("state", "pre"),
-        "home": (home.get("team") or {}).get("displayName") or "Home",
-        "away": (away.get("team") or {}).get("displayName") or "Away",
-        "home_score": home.get("score"),
-        "away_score": away.get("score"),
-        "completed": status.get("completed", False),
-    }
