@@ -1,246 +1,322 @@
+import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
-from datetime import datetime, timedelta
-from sqlalchemy import select
-from services.parlay_engine import ParlayEngine
-from services.tracker import ParlayTracker
-from database.db import SessionLocal, User
-from utils.helpers import format_parlay
 
-ODDS_OPTIONS = [2.0, 3.0, 4.0, 5.0, 7.0, 10.0, 15.0, 20.0]
+from services.parlay_engine import build_parlay
+from services.tracker import save_parlay
+from utils.helpers import (
+    format_parlay_message,
+    format_tracking_confirmation,
+    parse_odds,
+    parse_stake,
+)
 
-CHALLENGE_PREFIX_MAP = {
-    "2.0 Rollover": "rollover_2",
-    "1.5 Rollover": "rollover_1_5",
-    "Long Shot":    "longshot",
-}
-CHALLENGE_MAX_STAGES = {
-    "2.0 Rollover": 10,
-    "1.5 Rollover": 15,
-    "Long Shot":    1,
-}
+logger = logging.getLogger(__name__)
 
 
-async def parlay_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ----- Step 1: choose number of legs -----
+async def parlay_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [
+            InlineKeyboardButton("2-Leg", callback_data="parlay:legs:2"),
+            InlineKeyboardButton("3-Leg", callback_data="parlay:legs:3"),
+            InlineKeyboardButton("4-Leg", callback_data="parlay:legs:4"),
+        ],
+        [
+            InlineKeyboardButton("5-Leg", callback_data="parlay:legs:5"),
+            InlineKeyboardButton("6-Leg", callback_data="parlay:legs:6"),
+        ],
+    ]
     text = (
         "🎯 *Build a Parlay*\n\n"
-        "Select your *target odds* or enter a custom value.\n"
-        "_Higher odds = more legs + more risk._"
+        "Pick how many legs you want.\n"
+        "Engine will analyse today's fixtures and pick the highest-confidence selections."
     )
-    buttons = []
-    row = []
-    for i, odds in enumerate(ODDS_OPTIONS):
-        row.append(InlineKeyboardButton(
-            f"×{odds:.1f}", callback_data=f"parlay_odds_{odds}"))
-        if len(row) == 3 or i == len(ODDS_OPTIONS) - 1:
-            buttons.append(row)
-            row = []
-    buttons.append([InlineKeyboardButton("✏️ Custom Odds", callback_data="parlay_custom")])
-    buttons.append([InlineKeyboardButton("🏠 Main Menu", callback_data="menu_main")])
-
-    markup = InlineKeyboardMarkup(buttons)
-    if update.callback_query:
-        await update.callback_query.edit_message_text(
-            text, parse_mode="Markdown", reply_markup=markup)
-    else:
-        await update.message.reply_text(text, parse_mode="Markdown", reply_markup=markup)
-
-
-async def parlay_custom_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE,
-                                challenge=None, stage=None):
-    """Prompt user to type custom odds. Works for both parlay and challenge flows."""
-    context.user_data["awaiting_odds"] = {
-        "active":    True,
-        "challenge": challenge,
-        "stage":     stage,
-    }
-    kb = [[InlineKeyboardButton("❌ Cancel", callback_data="menu_parlay" if not challenge else "menu_challenges")]]
-    text = (
-        "✏️ *Custom Target Odds*\n\n"
-        "Send me your target odds as a number.\n"
-        "_Example: 4.5 or 12 or 33.0_"
+    target = update.effective_message
+    if target is None and update.callback_query is not None:
+        target = update.callback_query.message
+    await target.reply_text(
+        text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard)
     )
-    if update.callback_query:
-        await update.callback_query.edit_message_text(
-            text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
-    else:
-        await update.message.reply_text(
-            text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
 
 
-async def parlay_custom_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    await parlay_custom_prompt(update, context)
+async def parlay_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data.split(":")
 
-
-async def parlay_odds_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer("🔍 Building your parlay...")
-    target = float(q.data[len("parlay_odds_"):])
-    await build_and_send(update, context, target)
-
-
-async def handle_custom_odds(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """MessageHandler — fires on any text when awaiting_odds is active."""
-    state = context.user_data.get("awaiting_odds", {})
-    if not state.get("active"):
-        return
-
-    raw = update.message.text.strip()
-    try:
-        target = float(raw)
-        if target < 1.1 or target > 1000:
-            raise ValueError
-    except ValueError:
-        cancel_cb = "menu_challenges" if state.get("challenge") else "menu_parlay"
-        kb = [[InlineKeyboardButton("❌ Cancel", callback_data=cancel_cb)]]
-        await update.message.reply_text(
-            "❌ Please send a valid number between *1.1* and *1000*.\n_e.g. 4.5_",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(kb))
-        return
-
-    context.user_data["awaiting_odds"] = {}
-    challenge = state.get("challenge")
-    stage = state.get("stage")
-    await build_and_send(update, context, target, challenge=challenge, stage=stage)
-
-
-async def build_and_send(update: Update, context: ContextTypes.DEFAULT_TYPE,
-                         target_odds: float, challenge=None, stage=None):
-    msg = update.message or update.callback_query.message
-    status = await msg.reply_text("🔍 Scanning fixtures & odds...")
-
-    async with SessionLocal() as s:
-        result = await s.execute(
-            select(User).where(User.tg_id == update.effective_user.id))
-        user = result.scalar_one_or_none()
-        risk = user.risk_level if user else "balanced"
-        user_pk = user.id if user else None
-
-    engine = ParlayEngine()
-    try:
-        date = datetime.utcnow().strftime("%Y%m%d")
-        selections = await engine.gather_selections(date)
-        if not selections:
-            date = (datetime.utcnow() + timedelta(days=1)).strftime("%Y%m%d")
-            selections = await engine.gather_selections(date)
-
-        if not selections:
-            kb = [
-                [InlineKeyboardButton("🔁 Try Again", callback_data=f"parlay_odds_{target_odds}")],
-                [InlineKeyboardButton("🏠 Main Menu", callback_data="menu_main")],
-            ]
-            await status.edit_text(
-                "❌ No fixtures with odds found right now. Try again later.",
-                reply_markup=InlineKeyboardMarkup(kb))
-            return
-
-        parlay = engine.build_parlay(selections, target_odds, risk=risk)
-        if not parlay:
-            kb = [
-                [InlineKeyboardButton("🎯 Pick Different Odds", callback_data="menu_parlay")],
-                [InlineKeyboardButton("⚙️ Change Risk Profile", callback_data="menu_settings")],
-                [InlineKeyboardButton("🏠 Main Menu",           callback_data="menu_main")],
-            ]
-            await status.edit_text(
-                f"❌ Couldn't build a parlay near *×{target_odds}* with risk *{risk}*.\n\n"
-                "Try different odds or adjust your risk profile.",
-                parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup(kb))
-            return
-
-        text = format_parlay(parlay, target_odds)
-        if challenge:
-            text = f"🏆 *Challenge: {challenge}* — Stage {stage}\n\n" + text
-
-        context.user_data["last_parlay"] = {
-            "target":    target_odds,
-            "data":      parlay,
-            "challenge": challenge,
-            "stage":     stage,
-            "user_pk":   user_pk,
-        }
-
-        kb = [
+    # parlay:legs:<N>  -> ask for risk
+    if data[1] == "legs":
+        legs = int(data[2])
+        keyboard = [
             [
-                InlineKeyboardButton("📌 Track This",  callback_data="track_yes"),
-                InlineKeyboardButton("🔁 Regenerate", callback_data=f"regen_{target_odds}"),
-            ],
+                InlineKeyboardButton("Conservative", callback_data=f"parlay:risk:{legs}:safe"),
+                InlineKeyboardButton("Balanced",     callback_data=f"parlay:risk:{legs}:balanced"),
+                InlineKeyboardButton("Aggressive",   callback_data=f"parlay:risk:{legs}:risky"),
+            ]
         ]
-
-        if challenge:
-            prefix = CHALLENGE_PREFIX_MAP.get(challenge)
-            max_stage = CHALLENGE_MAX_STAGES.get(challenge, 1)
-            next_stage = stage + 1
-            if prefix and next_stage <= max_stage:
-                kb.append([InlineKeyboardButton(
-                    f"✅ Won! → Stage {next_stage}",
-                    callback_data=f"chal_{prefix}_{next_stage}")])
-            kb.append([InlineKeyboardButton("🏆 Challenges", callback_data="menu_challenges")])
-        else:
-            kb.append([
-                InlineKeyboardButton("🎯 New Parlay", callback_data="menu_parlay"),
-                InlineKeyboardButton("🏠 Menu",       callback_data="menu_main"),
-            ])
-
-        await status.edit_text(
-            text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
-    finally:
-        await engine.close()
-
-
-async def track_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    data = context.user_data.get("last_parlay")
-
-    if not data:
-        kb = [[InlineKeyboardButton("🏠 Main Menu", callback_data="menu_main")]]
-        await q.edit_message_text(
-            "⚠️ Nothing to track — please build a parlay first.",
-            reply_markup=InlineKeyboardMarkup(kb))
-        return
-    if not data["user_pk"]:
-        kb = [[InlineKeyboardButton("🏠 Main Menu", callback_data="menu_main")]]
-        await q.edit_message_text(
-            "⚠️ User not found. Please press /start first.",
-            reply_markup=InlineKeyboardMarkup(kb))
-        return
-
-    tracker = ParlayTracker()
-    try:
-        pid = await tracker.save_parlay(
-            user_id=data["user_pk"],
-            target_odds=data["target"],
-            parlay=data["data"],
-            challenge_type=data["challenge"],
-            challenge_stage=data["stage"],
+        await query.edit_message_text(
+            f"📊 *{legs}-Leg Parlay*\n\nChoose risk profile:",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard),
         )
-        kb = [
+        return
+
+    # parlay:risk:<N>:<risk>  -> ask for market filter
+    if data[1] == "risk":
+        legs = int(data[2])
+        risk = data[3]
+        keyboard = [
             [
-                InlineKeyboardButton("🎯 New Parlay", callback_data="menu_parlay"),
-                InlineKeyboardButton("📊 My Stats",   callback_data="menu_stats"),
+                InlineKeyboardButton("⚽ Win",        callback_data=f"parlay:mkt:{legs}:{risk}:1X2"),
+                InlineKeyboardButton("🤝 Win or Draw", callback_data=f"parlay:mkt:{legs}:{risk}:DC"),
             ],
-            [InlineKeyboardButton("🏠 Main Menu", callback_data="menu_main")],
+            [
+                InlineKeyboardButton("🎯 Goals (O/U)", callback_data=f"parlay:mkt:{legs}:{risk}:OU"),
+                InlineKeyboardButton("🥅 BTTS",        callback_data=f"parlay:mkt:{legs}:{risk}:BTTS"),
+            ],
+            [
+                InlineKeyboardButton("✨ Any market",  callback_data=f"parlay:mkt:{legs}:{risk}:ANY"),
+            ],
         ]
-        await q.edit_message_text(
-            q.message.text + f"\n\n✅ *Tracked!* Parlay ID #{pid}",
+        await query.edit_message_text(
+            f"📊 *{legs}-Leg · {risk.title()}*\n\nWhich market?",
             parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(kb))
-    finally:
-        await tracker.client.close()
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+
+    # parlay:mkt:<N>:<risk>:<market>  -> build it
+    if data[1] == "mkt":
+        legs = int(data[2])
+        risk = data[3]
+        market = data[4]
+
+        await query.edit_message_text("⏳ Crunching numbers...")
+
+        markets = None if market == "ANY" else [market]
+        try:
+            parlay = await build_parlay(legs=legs, risk=risk, markets=markets)
+        except Exception as e:
+            logger.exception("parlay build failed")
+            await query.edit_message_text(f"❌ Couldn't build parlay: {e}")
+            return
+
+        if not parlay or not parlay.get("legs"):
+            keyboard = [[
+                InlineKeyboardButton("🔄 Try again", callback_data=f"parlay:risk:{legs}:{risk}"),
+                InlineKeyboardButton("⬅️ Back",       callback_data="menu:main"),
+            ]]
+            await query.edit_message_text(
+                "😕 Not enough quality fixtures matched that filter.\n"
+                "Try a different market or risk profile.",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+            return
+
+        msg = format_parlay_message(parlay)
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "📌 Track this parlay",
+                    callback_data=f"track:save:{parlay['cache_id']}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "🔄 Rebuild",
+                    callback_data=f"parlay:mkt:{legs}:{risk}:{market}",
+                ),
+                InlineKeyboardButton("⬅️ Back", callback_data="menu:main"),
+            ],
+        ]
+        context.bot_data.setdefault("parlay_cache", {})[parlay["cache_id"]] = parlay
+        await query.edit_message_text(
+            msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return
 
 
-async def regen_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer("🔁 Regenerating...")
-    target = float(q.data[len("regen_"):])
-    last = context.user_data.get("last_parlay", {})
-    await build_and_send(
-        update, context, target,
-        challenge=last.get("challenge"),
-        stage=last.get("stage"),
-    )
+# ----- Tracking flow -----
+async def track_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data.split(":")
 
+    # track:save:<cache_id>  -> ask for stake
+    if data[1] == "save":
+        cache_id = data[2]
+        cache = context.bot_data.get("parlay_cache", {}).get(cache_id)
+        if not cache:
+            await query.edit_message_text("⚠️ Parlay expired. Build a new one with /parlay.")
+            return
+
+        # Offer quick-pick stakes + custom
+        keyboard = [
+            [
+                InlineKeyboardButton("0u (track only)", callback_data=f"track:stake:{cache_id}:0"),
+                InlineKeyboardButton("1u",  callback_data=f"track:stake:{cache_id}:1"),
+                InlineKeyboardButton("2u",  callback_data=f"track:stake:{cache_id}:2"),
+            ],
+            [
+                InlineKeyboardButton("5u",  callback_data=f"track:stake:{cache_id}:5"),
+                InlineKeyboardButton("10u", callback_data=f"track:stake:{cache_id}:10"),
+                InlineKeyboardButton("✏️ Custom", callback_data=f"track:custom:{cache_id}"),
+            ],
+        ]
+        await query.edit_message_text(
+            "💰 *Stake size?*\n\nPick a quick amount or enter a custom value.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+
+    # track:custom:<cache_id>  -> wait for typed stake
+    if data[1] == "custom":
+        cache_id = data[2]
+        cache = context.bot_data.get("parlay_cache", {}).get(cache_id)
+        if not cache:
+            await query.edit_message_text("⚠️ Parlay expired. Build a new one with /parlay.")
+            return
+        context.user_data["awaiting_stake"] = cache_id
+        await query.message.reply_text(
+            "Send me the stake (in units). E.g. `2.5` or `0` to just track.",
+            parse_mode="Markdown",
+        )
+        return
+
+    # track:stake:<cache_id>:<amount>  -> persist
+    if data[1] == "stake":
+        cache_id = data[2]
+        try:
+            stake = float(data[3])
+        except (ValueError, IndexError):
+            stake = 0.0
+        await _persist_parlay(update, context, cache_id, stake, edit=True)
+        return
+
+    # track:odds:<parlay_id>  -> log actual odds taken later
+    if data[1] == "odds":
+        parlay_id = int(data[2])
+        context.user_data["awaiting_odds"] = parlay_id
+        await query.message.reply_text(
+            "Send me the actual odds you got (e.g. `5.40`)", parse_mode="Markdown"
+        )
+        return
+
+
+async def _persist_parlay(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    cache_id: str,
+    stake: float,
+    edit: bool,
+):
+    cache = context.bot_data.get("parlay_cache", {}).get(cache_id)
+    if not cache:
+        msg = "⚠️ Parlay expired. Build a new one with /parlay."
+        if edit and update.callback_query:
+            await update.callback_query.edit_message_text(msg)
+        else:
+            await update.effective_message.reply_text(msg)
+        return
+
+    user_id = update.effective_user.id
+    try:
+        parlay_id = await save_parlay(user_id=user_id, parlay=cache, stake=stake)
+    except Exception as e:
+        logger.exception("save failed")
+        err = f"❌ Couldn't save: {e}"
+        if edit and update.callback_query:
+            await update.callback_query.edit_message_text(err)
+        else:
+            await update.effective_message.reply_text(err)
+        return
+
+    confirmation = format_tracking_confirmation(parlay_id, cache, stake)
+    keyboard = [[
+        InlineKeyboardButton(
+            "🎟 Log actual odds taken",
+            callback_data=f"track:odds:{parlay_id}",
+        )
+    ]]
+
+    # cache_id is single-use; clean up so re-clicks don't double-save
+    context.bot_data.get("parlay_cache", {}).pop(cache_id, None)
+
+    if edit and update.callback_query:
+        await update.callback_query.edit_message_text(
+            confirmation,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+    else:
+        await update.effective_message.reply_text(
+            confirmation,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
+
+# ----- Free-text input router (stake & odds) -----
+async def handle_odds_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Stake first (typed via Custom)
+    if "awaiting_stake" in context.user_data:
+        cache_id = context.user_data.pop("awaiting_stake")
+        text = update.message.text.strip()
+        stake = parse_stake(text)
+        if stake is None:
+            # put it back so they can retry
+            context.user_data["awaiting_stake"] = cache_id
+            await update.message.reply_text(
+                "❌ Invalid stake. Send a number like `1`, `2.5` or `0`.",
+                parse_mode="Markdown",
+            )
+            return
+        await _persist_parlay(update, context, cache_id, stake, edit=False)
+        return
+
+    # Actual odds for an already-saved parlay
+    if "awaiting_odds" in context.user_data:
+        parlay_id = context.user_data.pop("awaiting_odds")
+        text = update.message.text.strip()
+        odds = parse_odds(text)
+        if odds is None:
+            context.user_data["awaiting_odds"] = parlay_id
+            await update.message.reply_text(
+                "❌ Invalid odds. Send a number like `5.40`.", parse_mode="Markdown"
+            )
+            return
+
+        from sqlalchemy import update as sql_update
+        from database.db import async_session, Parlay, User
+        from sqlalchemy import select
+
+        uid = update.effective_user.id
+        async with async_session() as s:
+            u = await s.scalar(select(User).where(User.tg_id == uid))
+            if not u:
+                await update.message.reply_text("❌ User not found.")
+                return
+            # ensure ownership
+            p = await s.scalar(
+                select(Parlay).where(Parlay.id == parlay_id, Parlay.user_id == u.id)
+            )
+            if not p:
+                await update.message.reply_text("❌ Parlay not found or not yours.")
+                return
+            await s.execute(
+                sql_update(Parlay)
+                .where(Parlay.id == parlay_id)
+                .values(actual_odds=odds)
+            )
+            await s.commit()
+
+        await update.message.reply_text(
+            f"✅ Updated parlay #{parlay_id} with odds *{odds}x*",
+            parse_mode="Markdown",
+        )
+        return
+
+    # Otherwise: ignore (it's a normal message)
+    return
