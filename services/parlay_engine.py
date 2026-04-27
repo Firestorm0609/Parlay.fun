@@ -1,110 +1,84 @@
-"""
-Parlay generator.
-
-Upgrades:
-- gather_selections() honours user-chosen market filters
-- generate_parlay() supports "Any" market (no filter), graceful fallback when fewer events match
-- Lottery mode mixes scored picks with random long-shots
-"""
-import random
-from typing import List, Dict, Optional
-
-from services.espn_api import fetch_scoreboard, parse_event
-from services.analytics import build_market_options, score_selection
+from itertools import combinations
+from datetime import datetime
+from services.espn_api import ESPNClient
+from services.analytics import evaluate_market
+from config import RISK_LEVELS, LEAGUES
 
 
-# Default markets per risk band when the user picks "Any"
-RISK_PROFILES = {
-    "safe":     {"picks": 3, "min_odds": 1.30, "max_odds": 1.85,
-                 "markets": ["ML", "Spread", "DC"]},
-    "balanced": {"picks": 4, "min_odds": 1.50, "max_odds": 2.50,
-                 "markets": ["ML", "Total", "Spread", "DC"]},
-    "risky":    {"picks": 5, "min_odds": 1.80, "max_odds": 4.00,
-                 "markets": ["ML", "Total", "BTTS", "Spread"]},
-    "lottery":  {"picks": 6, "min_odds": 2.50, "max_odds": 8.00,
-                 "markets": ["ML", "Total", "BTTS", "CorrectScore"]},
-}
+class ParlayEngine:
+    def __init__(self):
+        self.client = ESPNClient()
 
-# Map of UI filter → analytics market list
-MARKET_FILTER_MAP = {
-    "any":          None,                       # use risk-profile default
-    "win":          ["ML"],
-    "draw":         ["ML"],                     # we'll filter to Draw picks below
-    "goals":        ["Total"],
-    "btts":         ["BTTS"],
-    "dc":           ["DC"],
-    "spread":       ["Spread"],
-    "correctscore": ["CorrectScore"],
-}
+    async def gather_selections(self, date: str = None, markets=None):
+        markets = markets or ["1X2", "OU", "BTTS"]
+        raw = await self.client.fetch_all_leagues(date)
+        all_selections = []
+
+        for league_code, data in raw.items():
+            if isinstance(data, Exception) or not data:
+                continue
+            fixtures = ESPNClient.parse_events(data, league_code)
+            for fx in fixtures:
+                if fx["status"] != "pre":
+                    continue
+                for m in markets:
+                    all_selections.extend(evaluate_market(fx, m))
+        return all_selections
+
+    def build_parlay(self, selections, target_odds, risk="balanced", tolerance=0.15):
+        """Find a combination of selections close to target_odds."""
+        cfg = RISK_LEVELS[risk]
+        # Filter by criteria
+        pool = [
+            s for s in selections
+            if s["probability"] >= cfg["min_prob"]
+            and s["odds"] <= cfg["max_odds_per_leg"]
+            and s["confidence"] >= 40
+        ]
+        # Sort by confidence
+        pool.sort(key=lambda x: x["confidence"], reverse=True)
+        # Trim pool to keep combinatorics manageable
+        pool = pool[:40]
+
+        # Avoid same fixture twice
+        best = None
+        best_diff = float("inf")
+        max_legs = cfg["max_legs"]
+
+        target_min = target_odds * (1 - tolerance)
+        target_max = target_odds * (1 + tolerance)
+
+        for n in range(1, max_legs + 1):
+            for combo in combinations(pool, n):
+                fids = [s["fixture"]["id"] for s in combo]
+                if len(set(fids)) != len(fids):
+                    continue
+                total = 1.0
+                for s in combo:
+                    total *= s["odds"]
+                if target_min <= total <= target_max:
+                    # score: prefer higher avg confidence + closer to target
+                    avg_conf = sum(s["confidence"] for s in combo) / len(combo)
+                    diff = abs(total - target_odds) / target_odds - (avg_conf / 1000)
+                    if diff < best_diff:
+                        best_diff = diff
+                        best = {
+                            "selections": list(combo),
+                            "total_odds": round(total, 2),
+                            "avg_confidence": round(avg_conf, 1),
+                            "combined_probability": _combined_prob(combo),
+                        }
+            if best and n >= 2:
+                # good enough, stop early to save CPU
+                break
+        return best
+
+    async def close(self):
+        await self.client.close()
 
 
-async def gather_selections(sport: str,
-                            risk: str,
-                            markets: Optional[List[str]] = None,
-                            market_filter: Optional[str] = None) -> List[Dict]:
-    """
-    Returns a flat list of scored selection dicts.
-    `market_filter` is the UI string (any/win/draw/goals/btts/dc/spread/correctscore).
-    `markets` is an explicit list of analytics market codes (overrides filter).
-    """
-    profile = RISK_PROFILES.get(risk, RISK_PROFILES["balanced"])
-    events = await fetch_scoreboard(sport)
-    parsed = [parse_event(e) for e in events if e]
-    upcoming = [e for e in parsed if e.get("status") in ("pre", "in")]
-
-    if markets is None:
-        if market_filter and market_filter in MARKET_FILTER_MAP:
-            mapped = MARKET_FILTER_MAP[market_filter]
-            markets = mapped if mapped else profile["markets"]
-        else:
-            markets = profile["markets"]
-
-    selections: List[Dict] = []
-    for ev in upcoming:
-        opts = build_market_options(ev, sport, markets)
-
-        # Special-case "Draw only"
-        if market_filter == "draw":
-            opts = [o for o in opts if o["pick"] == "Draw"]
-        # Special-case "Win or Draw" (== DC 1X / X2)
-        if market_filter == "win_or_draw":
-            opts = [o for o in opts if o["market"] == "DC" and o["pick"].startswith(("1X", "X2"))]
-
-        for o in opts:
-            if profile["min_odds"] <= o["odds"] <= profile["max_odds"]:
-                o["score"] = score_selection(o, profile)
-                selections.append(o)
-
-    return selections
-
-
-def generate_parlay(selections: List[Dict], risk: str) -> List[Dict]:
-    profile = RISK_PROFILES.get(risk, RISK_PROFILES["balanced"])
-    n = profile["picks"]
-    if not selections:
-        return []
-
-    selections = list(selections)
-    selections.sort(key=lambda s: s["score"], reverse=True)
-
-    seen_events = set()
-    chosen: List[Dict] = []
-    for s in selections:
-        if s["event_id"] in seen_events:
-            continue
-        seen_events.add(s["event_id"])
-        chosen.append(s)
-        if len(chosen) >= n:
-            break
-
-    # Lottery / risky → swap last leg with a random long-shot
-    if risk in ("risky", "lottery") and len(selections) > n:
-        pool = [s for s in selections
-                if s["event_id"] not in {c["event_id"] for c in chosen[:-1]}]
-        pool.sort(key=lambda s: s["odds"], reverse=True)  # bias long shots
-        head = pool[: max(3, n)]
-        if head:
-            random.shuffle(head)
-            chosen[-1] = head[0]
-
-    return chosen
+def _combined_prob(combo):
+    p = 1.0
+    for s in combo:
+        p *= s["probability"]
+    return round(p, 4)
