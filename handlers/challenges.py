@@ -27,7 +27,7 @@ async def challenges_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.edit_message_text(
             text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
     else:
-        await (update.message or update.callback_query.message).reply_text(
+        await update.message.reply_text(
             text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
 
 
