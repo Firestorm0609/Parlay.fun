@@ -1,77 +1,79 @@
+import logging
+from sqlalchemy import select
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
-from sqlalchemy import select
-from database.db import SessionLocal, User
 
-RISK_LABELS = {
-    "safe":       "🟢 Safe",
-    "balanced":   "🟡 Balanced",
-    "aggressive": "🔴 Aggressive",
-}
+from database.db import async_session, User
 
-RISK_DESCRIPTIONS = {
-    "safe":       "Lower odds per leg · higher probability · fewer legs",
-    "balanced":   "Best mix of value and safety — recommended for most",
-    "aggressive": "Higher odds · more legs · bigger risk & reward",
-}
+logger = logging.getLogger(__name__)
 
 
-async def risk_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    async with SessionLocal() as s:
-        res = await s.execute(select(User).where(User.tg_id == user_id))
-        user = res.scalar_one_or_none()
-        current = user.risk_level if user else "balanced"
-
-    current_label = RISK_LABELS.get(current, current.title())
-    text = (
-        "⚙️ *Risk Profile*\n\n"
-        f"Current setting: *{current_label}*\n\n"
-        f"🟢 *Safe* — {RISK_DESCRIPTIONS['safe']}\n"
-        f"🟡 *Balanced* — {RISK_DESCRIPTIONS['balanced']}\n"
-        f"🔴 *Aggressive* — {RISK_DESCRIPTIONS['aggressive']}\n"
-    )
-    kb = [
-        [
-            InlineKeyboardButton("🟢 Safe",       callback_data="risk_set_safe"),
-            InlineKeyboardButton("🟡 Balanced",   callback_data="risk_set_balanced"),
-            InlineKeyboardButton("🔴 Aggressive", callback_data="risk_set_aggressive"),
-        ],
-        [InlineKeyboardButton("🏠 Main Menu", callback_data="menu_main")],
-    ]
-    markup = InlineKeyboardMarkup(kb)
-    if update.callback_query:
-        await update.callback_query.edit_message_text(
-            text, parse_mode="Markdown", reply_markup=markup)
-    else:
-        await update.message.reply_text(text, parse_mode="Markdown", reply_markup=markup)
+LEGS_CYCLE = [2, 3, 4, 5, 6]
+RISK_CYCLE = ["safe", "balanced", "risky"]
 
 
-async def risk_set_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    new_risk = q.data[len("risk_set_"):]
-    await q.answer(f"✅ Risk set to {new_risk.title()}!")
-
-    async with SessionLocal() as s:
-        res = await s.execute(select(User).where(User.tg_id == update.effective_user.id))
-        user = res.scalar_one_or_none()
-        if user:
-            user.risk_level = new_risk
+async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    async with async_session() as s:
+        u = await s.scalar(select(User).where(User.tg_id == uid))
+        if not u:
+            u = User(tg_id=uid)
+            s.add(u)
             await s.commit()
+            u = await s.scalar(select(User).where(User.tg_id == uid))
 
-    label = RISK_LABELS.get(new_risk, new_risk.title())
-    desc = RISK_DESCRIPTIONS.get(new_risk, "")
     text = (
-        f"✅ Risk profile set to *{label}*\n\n"
-        f"_{desc}_"
+        "⚙️ *Settings*\n\n"
+        f"Risk: *{u.pref_risk}*\n"
+        f"Default legs: *{u.pref_legs}*\n"
+        f"Notifications: *{'on' if u.notify else 'off'}*\n\n"
+        "Tap to cycle a setting:"
     )
-    kb = [
-        [
-            InlineKeyboardButton("🎯 Build Parlay", callback_data="menu_parlay"),
-            InlineKeyboardButton("⚙️ Change",       callback_data="menu_settings"),
-        ],
-        [InlineKeyboardButton("🏠 Main Menu", callback_data="menu_main")],
+    keyboard = [
+        [InlineKeyboardButton("🎲 Risk", callback_data="settings:risk")],
+        [InlineKeyboardButton("📊 Default legs", callback_data="settings:legs")],
+        [InlineKeyboardButton("🔔 Notify", callback_data="settings:notify")],
     ]
-    await q.edit_message_text(
-        text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
+    target = update.effective_message
+    if target is None and update.callback_query is not None:
+        target = update.callback_query.message
+    await target.reply_text(
+        text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
+
+async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    uid = update.effective_user.id
+    field = query.data.split(":", 1)[1]
+    async with async_session() as s:
+        u = await s.scalar(select(User).where(User.tg_id == uid))
+        if not u:
+            u = User(tg_id=uid)
+            s.add(u)
+            await s.flush()
+
+        if field == "risk":
+            i = RISK_CYCLE.index(u.pref_risk) if u.pref_risk in RISK_CYCLE else 1
+            u.pref_risk = RISK_CYCLE[(i + 1) % len(RISK_CYCLE)]
+        elif field == "legs":
+            i = LEGS_CYCLE.index(u.pref_legs) if u.pref_legs in LEGS_CYCLE else 1
+            u.pref_legs = LEGS_CYCLE[(i + 1) % len(LEGS_CYCLE)]
+        elif field == "notify":
+            u.notify = not u.notify
+
+        await s.commit()
+
+        await query.edit_message_text(
+            "✅ *Saved.*\n\n"
+            f"Risk: *{u.pref_risk}*\n"
+            f"Default legs: *{u.pref_legs}*\n"
+            f"Notifications: *{'on' if u.notify else 'off'}*",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🎲 Risk", callback_data="settings:risk")],
+                [InlineKeyboardButton("📊 Default legs", callback_data="settings:legs")],
+                [InlineKeyboardButton("🔔 Notify", callback_data="settings:notify")],
+            ]),
+        )
