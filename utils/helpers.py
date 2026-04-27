@@ -1,53 +1,73 @@
-from datetime import datetime
-
-CURRENCY_SYMBOLS = {
-    "USD": "$",
-    "EUR": "€",
-    "GBP": "£",
-    "NGN": "₦",
-    "CAD": "C$",
-    "AUD": "A$",
-    "ZAR": "R",
-    "INR": "₹",
-    "BRL": "R$",
-    "KES": "KSh",
-}
-
-def currency_symbol(code: str) -> str:
-    return CURRENCY_SYMBOLS.get(code, code)
+from typing import Optional, List, Dict
 
 
-def format_parlay(parlay, target_odds):
+def parse_odds(text: str) -> Optional[float]:
+    try:
+        v = float(text.replace(",", ".").strip())
+        if v < 1.01 or v > 1000:
+            return None
+        return round(v, 2)
+    except ValueError:
+        return None
+
+
+def parse_stake(text: str) -> Optional[float]:
+    """Parse a stake amount in 'units'. Accepts e.g. '1', '2.5', '0.5'."""
+    try:
+        v = float(text.replace(",", ".").strip())
+        if v < 0 or v > 100000:
+            return None
+        return round(v, 2)
+    except ValueError:
+        return None
+
+
+def _market_label(code: str) -> str:
+    return {
+        "1X2": "Win",
+        "DC": "Double Chance",
+        "OU": "Goals",
+        "BTTS": "BTTS",
+        "ANY": "Any",
+    }.get(code, code)
+
+
+def format_parlay_message(parlay: dict) -> str:
+    markets = parlay.get("markets") or ["ANY"]
+    market_str = ", ".join(_market_label(m) for m in markets)
+
     lines = [
-        f"🎯 *Parlay (Target: {target_odds})*",
-        f"💰 Total Odds: *{parlay['total_odds']}*",
-        f"📊 Avg Confidence: {parlay['avg_confidence']}%",
-        f"📈 Combined Prob: {parlay['combined_probability']*100:.1f}%",
+        f"🎯 *{len(parlay['legs'])}-Leg Parlay* — _{parlay['risk'].title()}_",
+        f"Markets: _{market_str}_",
+        f"Total Odds: *{parlay['total_odds']}*",
         "",
-        "*Selections:*",
     ]
-    for i, s in enumerate(parlay["selections"], 1):
-        fx = s["fixture"]
-        dt = datetime.fromisoformat(fx["date"].replace("Z", "+00:00"))
+    for i, leg in enumerate(parlay["legs"], 1):
         lines.append(
-            f"{i}. *{fx['home_team']} vs {fx['away_team']}*\n"
-            f"   📅 {dt.strftime('%b %d %H:%M')} | 🏆 {fx['league']}\n"
-            f"   ✅ {s['label']} @ *{s['odds']}*\n"
-            f"   🎯 Conf: {s['confidence']:.0f}% | Prob: {s['probability']*100:.0f}%"
+            f"*{i}.* {leg['home']} vs {leg['away']}\n"
+            f"   ↳ {leg['label']} @ {leg['odds']} ({leg['confidence']}%)"
         )
+    lines.append("")
+    lines.append(f"_Target: ~{parlay['target_total']}x_")
     return "\n".join(lines)
 
 
-def format_stats(stats, sym="$"):
-    return (
-        f"📊 *Your Performance*\n\n"
-        f"Total Parlays: {stats['total']}\n"
-        f"✅ Won: {stats['won']}\n"
-        f"❌ Lost: {stats['lost']}\n"
-        f"⏳ Pending: {stats['pending']}\n"
-        f"🎯 Win Rate: {stats['win_rate']:.1f}%\n"
-        f"💰 Profit: {sym}{stats['profit']:.2f}\n"
-        f"📈 ROI: {stats['roi']:.2f}%\n"
-        f"💵 Total Staked: {sym}{stats['staked']:.2f}"
-    )
-
+def format_tracking_confirmation(parlay_id: int, parlay: dict, stake: float) -> str:
+    """Confirmation shown after a parlay is saved — includes fixture context."""
+    lines = [
+        f"✅ *Tracking parlay #{parlay_id}*",
+        f"Total Odds: *{parlay['total_odds']}x*",
+        f"Stake: *{stake}u*",
+        "",
+        "*Legs:*",
+    ]
+    for i, leg in enumerate(parlay["legs"], 1):
+        lines.append(
+            f"  {i}. {leg['home']} vs {leg['away']} — {leg['label']} @ {leg['odds']}"
+        )
+    lines.append("")
+    if stake > 0:
+        potential = round((parlay["total_odds"] - 1) * stake, 2)
+        lines.append(f"_Potential profit: +{potential}u_")
+    lines.append("_Auto-settles after kickoff. View with /history or /stats._")
+    return "\n".join(lines)
