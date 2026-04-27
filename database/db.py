@@ -10,7 +10,7 @@ from sqlalchemy import (
     ForeignKey,
     Boolean,
 )
-from sqlalchemy.orm import declarative_base, relationship
+from sqlalchemy.orm import declarative_base
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 
 DB_URL = os.getenv("DB_URL", "sqlite+aiosqlite:///parlay.db")
@@ -40,7 +40,7 @@ class Parlay(Base):
     total_odds = Column(Float)
     actual_odds = Column(Float, nullable=True)
     stake = Column(Float, default=0)
-    status = Column(String, default="pending")  # pending, won, lost, void
+    status = Column(String, default="pending")
     created_at = Column(DateTime, default=datetime.utcnow)
     settled_at = Column(DateTime, nullable=True)
 
