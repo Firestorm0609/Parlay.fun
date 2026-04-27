@@ -38,7 +38,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = _main_menu_text(user.first_name)
     keyboard = _main_menu_keyboard()
 
-    # Works whether triggered by /start (message) or by a callback_query.
     if update.message is not None:
         await update.message.reply_text(
             text, parse_mode="Markdown", reply_markup=keyboard
