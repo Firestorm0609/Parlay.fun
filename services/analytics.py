@@ -149,21 +149,40 @@ def evaluate_market(fixture, market_type):
     if market_type == "BTTS":
         # Heuristic from forms & ML probabilities
         attack_factor = (home_form["score"] + away_form["score"]) / 2
-        btts_yes = max(0.35, min(0.75, 0.45 + (attack_factor - 0.5) * 0.35))
+
+        # BUG FIX 1: Baseline was 0.45 (biased toward "No"). Real-world BTTS Yes
+        # rate in top leagues is ~52-55%, so use 0.52 as the neutral baseline.
+        # BUG FIX 2: Also factor in moneyline closeness — when both teams have
+        # competitive ML odds (neither is a heavy favourite), it signals an
+        # open game where both sides are likely to score.
+        ml_balance_bonus = 0.0
+        if home_dec and away_dec:
+            # If odds are close (e.g. 2.0 vs 2.0), both teams are evenly matched
+            # → more open, attacking game → higher BTTS Yes probability.
+            ratio = min(home_dec, away_dec) / max(home_dec, away_dec)
+            ml_balance_bonus = (ratio - 0.5) * 0.08  # max ~+0.04 when evenly matched
+
+        btts_yes = max(0.35, min(0.75, 0.55 + (attack_factor - 0.5) * 0.20 + ml_balance_bonus))
         btts_no = 1 - btts_yes
+
+        # BUG FIX 3: Confidence was passing raw 1/btts_yes (no vig) as odds,
+        # making implied == prob always, so edge was always 0. Pass the actual
+        # vig-adjusted odds instead so edge is computed correctly.
+        yes_odds = round(1 / btts_yes * 0.95, 2)
+        no_odds = round(1 / btts_no * 0.95, 2)
         selections.append({
             "fixture": fixture, "market": "BTTS", "selection": "Yes",
             "label": "Both Teams To Score: Yes",
-            "odds": round(1 / btts_yes * 0.95, 2),
+            "odds": yes_odds,
             "probability": btts_yes,
-            "confidence": _confidence(btts_yes, 1/btts_yes, 0),
+            "confidence": _confidence(btts_yes, yes_odds, 0),
         })
         selections.append({
             "fixture": fixture, "market": "BTTS", "selection": "No",
             "label": "Both Teams To Score: No",
-            "odds": round(1 / btts_no * 0.95, 2),
+            "odds": no_odds,
             "probability": btts_no,
-            "confidence": _confidence(btts_no, 1/btts_no, 0),
+            "confidence": _confidence(btts_no, no_odds, 0),
         })
 
     return selections
