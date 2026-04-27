@@ -8,13 +8,16 @@ def _main_menu_markup():
         [InlineKeyboardButton("🎯 Build Parlay", callback_data="menu_parlay")],
         [
             InlineKeyboardButton("🏆 Challenges", callback_data="menu_challenges"),
-            InlineKeyboardButton("📊 My Stats", callback_data="menu_stats"),
+            InlineKeyboardButton("📊 My Stats",   callback_data="menu_stats"),
         ],
         [
-            InlineKeyboardButton("💰 Bankroll", callback_data="menu_bankroll"),
+            InlineKeyboardButton("💰 Bankroll",    callback_data="menu_bankroll"),
             InlineKeyboardButton("⚙️ Risk Profile", callback_data="menu_settings"),
         ],
-        [InlineKeyboardButton("❓ Help", callback_data="menu_help")],
+        [
+            InlineKeyboardButton("👥 Bot Stats", callback_data="menu_botstats"),
+            InlineKeyboardButton("❓ Help",       callback_data="menu_help"),
+        ],
     ]
     return InlineKeyboardMarkup(kb)
 
@@ -44,18 +47,23 @@ async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🎯 *Build Parlay* — Choose target odds, get smart selections\n"
         "🏆 *Challenges* — Rollover & longshot multi-stage challenges\n"
         "📊 *My Stats* — Win rate, profit, ROI & history\n"
-        "💰 *Bankroll* — Set and track your balance\n"
-        "⚙️ *Risk Profile* — Safe / Balanced / Aggressive\n\n"
+        "💰 *Bankroll* — Set and track your balance (custom amounts supported)\n"
+        "⚙️ *Risk Profile* — Safe / Balanced / Aggressive\n"
+        "👥 *Bot Stats* — See how many users are online & total registered\n\n"
         "*Markets:* 1X2 · Double Chance · Over/Under · BTTS\n"
         "*Data Source:* ESPN fixtures + DraftKings odds\n\n"
         "💡 _Tip: Higher target odds = more legs = more risk._\n"
         "💡 _Profit protection locks 30% of winnings automatically._"
     )
-    kb = [[InlineKeyboardButton("🏠 Main Menu", callback_data="menu_main")]]
+    kb = [
+        [
+            InlineKeyboardButton("👥 Bot Stats", callback_data="menu_botstats"),
+            InlineKeyboardButton("🏠 Main Menu", callback_data="menu_main"),
+        ]
+    ]
     markup = InlineKeyboardMarkup(kb)
     if update.callback_query:
         await update.callback_query.edit_message_text(
             text, parse_mode="Markdown", reply_markup=markup)
     else:
         await update.message.reply_text(text, parse_mode="Markdown", reply_markup=markup)
-
