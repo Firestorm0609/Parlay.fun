@@ -1,200 +1,184 @@
 import math
-from typing import Dict, List
+from typing import List, Dict
 
 
-def american_to_decimal(american):
-    if american is None:
-        return None
-    try:
-        a = float(american)
-    except (TypeError, ValueError):
-        return None
-    if a > 0:
-        return round(1 + a / 100, 3)
-    else:
-        return round(1 + 100 / abs(a), 3)
+TEAM_STRENGTH_DEFAULT = 0.5
 
 
-def implied_probability(decimal_odds):
-    if not decimal_odds or decimal_odds <= 1:
-        return 0
-    return 1 / decimal_odds
+def _team_strength(team: str) -> float:
+    # deterministic pseudo-rating from team name so demos are stable
+    h = sum(ord(c) for c in team) % 100
+    return 0.35 + (h / 100) * 0.5  # 0.35 .. 0.85
 
 
-def remove_vig(probs: List[float]) -> List[float]:
-    total = sum(probs)
-    if total == 0:
-        return probs
-    return [p / total for p in probs]
+def _poisson_pmf(lmbda: float, k: int) -> float:
+    return math.exp(-lmbda) * (lmbda ** k) / math.factorial(k)
 
 
-def parse_form(form_str: str) -> Dict:
-    """ESPN form string like 'WWLDW'. Higher index = more recent."""
-    if not form_str:
-        return {"score": 0.5, "wins": 0, "draws": 0, "losses": 0, "momentum": 0}
-    pts = 0
-    weighted = 0
-    weights_total = 0
-    wins = draws = losses = 0
-    for i, ch in enumerate(form_str):
-        weight = i + 1
-        weights_total += weight * 3
-        if ch == "W":
-            pts += 3
-            weighted += 3 * weight
-            wins += 1
-        elif ch == "D":
-            pts += 1
-            weighted += 1 * weight
-            draws += 1
-        else:
-            losses += 1
-    score = weighted / weights_total if weights_total else 0.5
-    momentum = 0
-    if len(form_str) >= 3:
-        recent = form_str[-3:]
-        momentum = sum(1 if c == "W" else -1 if c == "L" else 0 for c in recent)
+def _match_probs(home_str: float, away_str: float) -> Dict[str, float]:
+    # expected goals per side — small home advantage baked in
+    home_xg = 1.1 + home_str * 1.4
+    away_xg = 0.8 + away_str * 1.2
+
+    p_home = p_draw = p_away = 0.0
+    for i in range(0, 6):
+        for j in range(0, 6):
+            p = _poisson_pmf(home_xg, i) * _poisson_pmf(away_xg, j)
+            if i > j:
+                p_home += p
+            elif i == j:
+                p_draw += p
+            else:
+                p_away += p
+
+    total = p_home + p_draw + p_away
     return {
-        "score": score,
-        "wins": wins, "draws": draws, "losses": losses,
-        "momentum": momentum,
+        "home": p_home / total,
+        "draw": p_draw / total,
+        "away": p_away / total,
+        "home_xg": home_xg,
+        "away_xg": away_xg,
     }
 
 
-def evaluate_market(fixture, market_type):
-    """Return list of {selection, odds, probability, confidence}."""
-    if not fixture.get("odds"):
-        return []
+def _odds_from_prob(p: float, vig: float = 0.05) -> float:
+    if p <= 0:
+        return 99.0
+    fair = 1 / p
+    return round(fair * (1 - vig), 2)
 
-    odds = fixture["odds"]
-    home_dec = american_to_decimal(odds.get("home_ml"))
-    away_dec = american_to_decimal(odds.get("away_ml"))
-    draw_dec = american_to_decimal(odds.get("draw_odds"))
 
-    home_form = parse_form(fixture.get("home_form", ""))
-    away_form = parse_form(fixture.get("away_form", ""))
+def _confidence(prob: float, odds: float, edge_bias: float = 0.0) -> int:
+    # 0..100
+    base = prob * 100
+    edge = (prob * odds - 1) * 30
+    score = base + edge + edge_bias
+    return max(0, min(100, int(score)))
+
+
+def analyse_fixture(fx: Dict) -> List[Dict]:
+    home_str = _team_strength(fx["home"])
+    away_str = _team_strength(fx["away"])
+    probs = _match_probs(home_str, away_str)
 
     selections = []
 
-    if market_type == "1X2" and home_dec and away_dec:
-        probs = [implied_probability(home_dec)]
-        if draw_dec:
-            probs.append(implied_probability(draw_dec))
-        probs.append(implied_probability(away_dec))
-        true_probs = remove_vig(probs)
+    # ---------------- 1X2 ----------------
+    home_odds = _odds_from_prob(probs["home"])
+    draw_odds = _odds_from_prob(probs["draw"])
+    away_odds = _odds_from_prob(probs["away"])
 
-        # Form-adjusted probability
-        form_adj = (home_form["score"] - away_form["score"]) * 0.05
-
-        home_p = max(0.01, min(0.99, true_probs[0] + form_adj))
-        away_p = max(0.01, min(0.99, true_probs[-1] - form_adj))
-
+    if probs["home"] >= 0.45:
         selections.append({
-            "fixture": fixture, "market": "1X2", "selection": "Home Win",
-            "label": fixture["home_team"], "odds": home_dec,
-            "probability": home_p,
-            "confidence": _confidence(home_p, home_dec, home_form["momentum"]),
+            "market": "1X2",
+            "pick": "home",
+            "label": f"{fx['home']} to win",
+            "odds": home_odds,
+            "prob": round(probs["home"], 3),
+            "confidence": _confidence(probs["home"], home_odds, 5),
         })
+    if probs["away"] >= 0.45:
         selections.append({
-            "fixture": fixture, "market": "1X2", "selection": "Away Win",
-            "label": fixture["away_team"], "odds": away_dec,
-            "probability": away_p,
-            "confidence": _confidence(away_p, away_dec, away_form["momentum"]),
+            "market": "1X2",
+            "pick": "away",
+            "label": f"{fx['away']} to win",
+            "odds": away_odds,
+            "prob": round(probs["away"], 3),
+            "confidence": _confidence(probs["away"], away_odds, 5),
         })
-
-        # Double chance
-        dc_home = home_p + (true_probs[1] if draw_dec else 0)
-        if dc_home > 0:
-            dc_odds = round(1 / max(dc_home, 0.01) * 0.95, 2)
-            selections.append({
-                "fixture": fixture, "market": "DC", "selection": "1X",
-                "label": f"{fixture['home_team']} or Draw",
-                "odds": dc_odds, "probability": dc_home,
-                "confidence": _confidence(dc_home, dc_odds, home_form["momentum"]),
-            })
-
-        dc_away = away_p + (true_probs[1] if draw_dec else 0)
-        if dc_away > 0:
-            dc_odds = round(1 / max(dc_away, 0.01) * 0.95, 2)
-            selections.append({
-                "fixture": fixture, "market": "DC", "selection": "X2",
-                "label": f"Draw or {fixture['away_team']}",
-                "odds": dc_odds, "probability": dc_away,
-                "confidence": _confidence(dc_away, dc_odds, away_form["momentum"]),
-            })
-
-    if market_type == "OU" and odds.get("over_under"):
-        line = float(odds["over_under"])
-        # Heuristic: assume balanced -110/-110 base, refine via form
-        base_p = 0.5
-        # Teams in good form score more
-        attack_factor = (home_form["score"] + away_form["score"]) / 2
-        over_p = max(0.3, min(0.75, base_p + (attack_factor - 0.5) * 0.4))
-        under_p = 1 - over_p
-        over_odds = round(1 / over_p * 0.95, 2)
-        under_odds = round(1 / under_p * 0.95, 2)
+    if probs["draw"] >= 0.32:
         selections.append({
-            "fixture": fixture, "market": "OU", "selection": f"Over {line}",
-            "label": f"Over {line} Goals", "odds": over_odds,
-            "probability": over_p,
-            "confidence": _confidence(over_p, over_odds, 0),
-        })
-        selections.append({
-            "fixture": fixture, "market": "OU", "selection": f"Under {line}",
-            "label": f"Under {line} Goals", "odds": under_odds,
-            "probability": under_p,
-            "confidence": _confidence(under_p, under_odds, 0),
+            "market": "1X2",
+            "pick": "draw",
+            "label": "Draw",
+            "odds": draw_odds,
+            "prob": round(probs["draw"], 3),
+            "confidence": _confidence(probs["draw"], draw_odds, 0),
         })
 
-    if market_type == "BTTS":
-        # Heuristic from forms & ML probabilities
-        attack_factor = (home_form["score"] + away_form["score"]) / 2
-
-        # BUG FIX 1: Baseline was 0.45 (biased toward "No"). Real-world BTTS Yes
-        # rate in top leagues is ~52-55%, so use 0.52 as the neutral baseline.
-        # BUG FIX 2: Also factor in moneyline closeness — when both teams have
-        # competitive ML odds (neither is a heavy favourite), it signals an
-        # open game where both sides are likely to score.
-        ml_balance_bonus = 0.0
-        if home_dec and away_dec:
-            # If odds are close (e.g. 2.0 vs 2.0), both teams are evenly matched
-            # → more open, attacking game → higher BTTS Yes probability.
-            ratio = min(home_dec, away_dec) / max(home_dec, away_dec)
-            ml_balance_bonus = (ratio - 0.5) * 0.08  # max ~+0.04 when evenly matched
-
-        btts_yes = max(0.35, min(0.75, 0.55 + (attack_factor - 0.5) * 0.20 + ml_balance_bonus))
-        btts_no = 1 - btts_yes
-
-        # BUG FIX 3: Confidence was passing raw 1/btts_yes (no vig) as odds,
-        # making implied == prob always, so edge was always 0. Pass the actual
-        # vig-adjusted odds instead so edge is computed correctly.
-        yes_odds = round(1 / btts_yes * 0.95, 2)
-        no_odds = round(1 / btts_no * 0.95, 2)
+    # ---------------- Double Chance ----------------
+    p_1x = probs["home"] + probs["draw"]
+    p_x2 = probs["away"] + probs["draw"]
+    if p_1x >= 0.62:
+        odds = _odds_from_prob(p_1x)
         selections.append({
-            "fixture": fixture, "market": "BTTS", "selection": "Yes",
-            "label": "Both Teams To Score: Yes",
+            "market": "DC",
+            "pick": "1X",
+            "label": f"{fx['home']} or Draw",
+            "odds": odds,
+            "prob": round(p_1x, 3),
+            "confidence": _confidence(p_1x, odds, 4),
+        })
+    if p_x2 >= 0.62:
+        odds = _odds_from_prob(p_x2)
+        selections.append({
+            "market": "DC",
+            "pick": "X2",
+            "label": f"{fx['away']} or Draw",
+            "odds": odds,
+            "prob": round(p_x2, 3),
+            "confidence": _confidence(p_x2, odds, 4),
+        })
+
+    # ---------------- Over / Under 2.5 ----------------
+    expected_goals = probs["home_xg"] + probs["away_xg"]
+    over_prob = 1 - sum(
+        _poisson_pmf(expected_goals, k) for k in range(0, 3)
+    )
+    over_prob = max(0.05, min(0.95, over_prob))
+    under_prob = 1 - over_prob
+    if over_prob >= 0.55:
+        odds = _odds_from_prob(over_prob)
+        selections.append({
+            "market": "OU",
+            "pick": "over_2_5",
+            "label": "Over 2.5 goals",
+            "odds": odds,
+            "prob": round(over_prob, 3),
+            "confidence": _confidence(over_prob, odds, 3),
+        })
+    if under_prob >= 0.55:
+        odds = _odds_from_prob(under_prob)
+        selections.append({
+            "market": "OU",
+            "pick": "under_2_5",
+            "label": "Under 2.5 goals",
+            "odds": odds,
+            "prob": round(under_prob, 3),
+            "confidence": _confidence(under_prob, odds, 3),
+        })
+
+    # ---------------- BTTS ----------------
+    # Derive BTTS from Poisson directly: P(home>=1) * P(away>=1)
+    p_home_scores = 1 - _poisson_pmf(probs["home_xg"], 0)
+    p_away_scores = 1 - _poisson_pmf(probs["away_xg"], 0)
+    btts_yes = p_home_scores * p_away_scores
+    # Light blend with attack heuristic so demo team strengths still matter,
+    # but anchored to a realistic ~55% baseline rather than 45%.
+    attack_factor = (home_str + away_str) / 2
+    btts_yes = 0.6 * btts_yes + 0.4 * (0.55 + (attack_factor - 0.5) * 0.20)
+    btts_yes = max(0.25, min(0.85, btts_yes))
+    btts_no = 1 - btts_yes
+
+    if btts_yes >= 0.6:
+        yes_odds = _odds_from_prob(btts_yes)
+        selections.append({
+            "market": "BTTS",
+            "pick": "yes",
+            "label": "Both teams to score: Yes",
             "odds": yes_odds,
-            "probability": btts_yes,
+            "prob": round(btts_yes, 3),
             "confidence": _confidence(btts_yes, yes_odds, 0),
         })
+    if btts_no >= 0.6:
+        no_odds = _odds_from_prob(btts_no)
         selections.append({
-            "fixture": fixture, "market": "BTTS", "selection": "No",
-            "label": "Both Teams To Score: No",
+            "market": "BTTS",
+            "pick": "no",
+            "label": "Both teams to score: No",
             "odds": no_odds,
-            "probability": btts_no,
+            "prob": round(btts_no, 3),
             "confidence": _confidence(btts_no, no_odds, 0),
         })
 
     return selections
-
-
-def _confidence(prob, odds, momentum):
-    """0-100 score combining prob, edge, momentum."""
-    if not odds or odds <= 1:
-        return 0
-    implied = 1 / odds
-    edge = prob - implied
-    base = prob * 100
-    edge_bonus = edge * 50
-    momentum_bonus = momentum * 2
-    return max(0, min(100, base + edge_bonus + momentum_bonus))
