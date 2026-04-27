@@ -1,50 +1,44 @@
-import os
-import asyncio
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
-
-from database.db import all_users, get_conn
-
-ADMIN_IDS = {int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()}
+from database.db import get_bot_stats
 
 
-def is_admin(uid: int) -> bool:
-    return uid in ADMIN_IDS
+async def bot_stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show live bot usage stats — total users, online now, active today."""
+    stats = await get_bot_stats(online_minutes=5)
 
+    total   = stats["total"]
+    online  = stats["online"]
+    today   = stats["today"]
+    minutes = stats["online_minutes"]
 
-async def broadcast_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        return
-    msg = " ".join(ctx.args) if ctx.args else None
-    if not msg:
-        await update.message.reply_text("Usage: /broadcast <message>")
-        return
+    # Build a simple bar for visual flair
+    def dot_bar(n, cap=20):
+        filled = min(n, cap)
+        return "🟢" * filled + "⚪" * (cap - filled)
 
-    sent, failed = 0, 0
-    for u in all_users():
-        try:
-            await ctx.bot.send_message(u["user_id"], f"📢 {msg}")
-            sent += 1
-        except Exception:
-            failed += 1
-        await asyncio.sleep(0.05)  # avoid Telegram rate-limit
+    online_bar = dot_bar(online)
 
-    await update.message.reply_text(f"✅ Sent to {sent} users ({failed} failed).")
-
-
-async def stats_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        return
-    with get_conn() as c:
-        users    = c.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"]
-        parlays  = c.execute("SELECT COUNT(*) AS n FROM parlays").fetchone()["n"]
-        won      = c.execute("SELECT COUNT(*) AS n FROM parlays WHERE status='won'").fetchone()["n"]
-        lost     = c.execute("SELECT COUNT(*) AS n FROM parlays WHERE status='lost'").fetchone()["n"]
-        pending  = c.execute("SELECT COUNT(*) AS n FROM parlays WHERE status='pending'").fetchone()["n"]
-        volume   = c.execute("SELECT COALESCE(SUM(stake),0) AS v FROM parlays").fetchone()["v"] or 0
-    await update.message.reply_text(
-        f"👤 Users: *{users}*\n"
-        f"🎯 Parlays: *{parlays}* (won {won} / lost {lost} / pending {pending})\n"
-        f"💵 Total volume: *{volume:.2f}u*",
-        parse_mode="Markdown",
+    text = (
+        f"🌐 *Parlay.fun — Live Bot Stats*\n\n"
+        f"👥 *Total Users:*   `{total:,}`\n"
+        f"🟢 *Online Now:*    `{online:,}` _(active last {minutes} min)_\n"
+        f"📅 *Active Today:*  `{today:,}`\n\n"
+        f"{online_bar}\n\n"
+        f"_Stats refresh every time you open this screen._"
     )
+
+    kb = [
+        [
+            InlineKeyboardButton("🔄 Refresh",    callback_data="menu_botstats"),
+            InlineKeyboardButton("🏠 Main Menu",  callback_data="menu_main"),
+        ]
+    ]
+    markup = InlineKeyboardMarkup(kb)
+
+    if update.callback_query:
+        await update.callback_query.edit_message_text(
+            text, parse_mode="Markdown", reply_markup=markup)
+    else:
+        await update.message.reply_text(
+            text, parse_mode="Markdown", reply_markup=markup)
