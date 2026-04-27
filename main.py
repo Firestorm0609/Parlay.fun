@@ -30,7 +30,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-# How often to run auto-settlement (seconds). 1 hour by default.
 SETTLE_INTERVAL = int(os.getenv("SETTLE_INTERVAL", "3600"))
 
 
@@ -46,7 +45,6 @@ async def auto_settle_job(context: ContextTypes.DEFAULT_TYPE):
         return
 
     for item in results:
-        # item = {tg_id, parlay_id, status, total_odds, actual_odds, stake, notify}
         if not item.get("notify", True):
             continue
         tg_id = item.get("tg_id")
@@ -110,7 +108,6 @@ def main():
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_odds_input))
 
-    # Auto-settle job — runs every SETTLE_INTERVAL seconds, first run after 60s.
     if app.job_queue is not None:
         app.job_queue.run_repeating(
             auto_settle_job,
