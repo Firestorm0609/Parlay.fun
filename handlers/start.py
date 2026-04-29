@@ -15,6 +15,10 @@ def _main_menu_markup():
             InlineKeyboardButton("⚙️ Risk Profile", callback_data="menu_settings"),
         ],
         [
+            InlineKeyboardButton("🏆 Leaderboard", callback_data="menu_leaderboard"),
+            InlineKeyboardButton("🤖 Smart Bet",   callback_data="menu_smartbet"),
+        ],
+        [
             InlineKeyboardButton("👥 Bot Stats", callback_data="menu_botstats"),
             InlineKeyboardButton("❓ Help",       callback_data="menu_help"),
         ],
