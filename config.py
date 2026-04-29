@@ -6,7 +6,7 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = "sqlite+aiosqlite:///parlay_bot.db"
 
-ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports/{sport}/{league}/scoreboard"
+ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports/{path}/scoreboard"
 
 LEAGUES = {
     # Soccer
