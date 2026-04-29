@@ -51,23 +51,25 @@ class ESPNClient:
                 comp = event["competitions"][0]
                 competitors = comp["competitors"]
 
+                # Handle all sports: soccer, basketball, football, baseball, hockey, rugby, cricket
                 if sport == "soccer":
-                    home = next((c for c in competitors if c["homeAway"] == "home"), None)
-                    away = next((c for c in competitors if c["homeAway"] == "away"), None)
-                    if not home or not away:
-                        continue
-                    home_form = home.get("form", "")
-                    away_form = away.get("form", "")
-                    draw_odds = comp.get("odds", [{}])[0].get("drawOdds")
+                    home = next((c for c in competitors if c.get("homeAway") == "home"), None)
+                    away = next((c for c in competitors if c.get("homeAway") == "away"), None)
                 else:
-                    # NBA, NFL, MLB, NHL - no draw, no form
-                    home = competitors[0] if competitors[0]["homeAway"] == "home" else competitors[1]
-                    away = competitors[1] if competitors[1]["homeAway"] == "away" else competitors[0]
-                    if not home or not away:
-                        continue
-                    home_form = ""
-                    away_form = ""
-                    draw_odds = None
+                    # For all other sports: basketball, football, baseball, hockey, rugby, cricket
+                    # First competitor is usually home, second is away
+                    home = competitors[0] if len(competitors) > 0 else None
+                    away = competitors[1] if len(competitors) > 1 else None
+
+                if not home or not away:
+                    continue
+
+                # Form only exists for soccer
+                home_form = home.get("form", "") if sport == "soccer" else ""
+                away_form = away.get("form", "") if sport == "soccer" else ""
+
+                # Draw odds only for soccer
+                draw_odds = comp.get("odds", [{}])[0].get("drawOdds") if sport == "soccer" else None
 
                 fixture = {
                     "id": event["id"],
