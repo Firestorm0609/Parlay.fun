@@ -74,9 +74,33 @@ def evaluate_market(fixture, market_type):
     home_form = parse_form(fixture.get("home_form", ""))
     away_form = parse_form(fixture.get("away_form", ""))
 
+    is_soccer = fixture.get("sport") == "soccer"
     selections = []
 
-    if market_type == "1X2" and home_dec and away_dec:
+    # Money Line (for NBA, NFL, MLB, NHL, and soccer)
+    if market_type == "ML" and home_dec and away_dec:
+        probs = [implied_probability(home_dec), implied_probability(away_dec)]
+        true_probs = remove_vig(probs)
+
+        form_adj = (home_form["score"] - away_form["score"]) * 0.05 if is_soccer else 0
+
+        home_p = max(0.01, min(0.99, true_probs[0] + form_adj))
+        away_p = max(0.01, min(0.99, true_probs[1] - form_adj))
+
+        selections.append({
+            "fixture": fixture, "market": "ML", "selection": "Home Win",
+            "label": fixture["home_team"], "odds": home_dec,
+            "probability": home_p,
+            "confidence": _confidence(home_p, home_dec, home_form["momentum"] if is_soccer else 0),
+        })
+        selections.append({
+            "fixture": fixture, "market": "ML", "selection": "Away Win",
+            "label": fixture["away_team"], "odds": away_dec,
+            "probability": away_p,
+            "confidence": _confidence(away_p, away_dec, away_form["momentum"] if is_soccer else 0),
+        })
+
+    if market_type == "1X2" and is_soccer and home_dec and away_dec:
         probs = [implied_probability(home_dec)]
         if draw_dec:
             probs.append(implied_probability(draw_dec))
