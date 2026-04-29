@@ -20,6 +20,8 @@ class User(Base):
     profit_protection: Mapped[float] = mapped_column(Float, default=0.0)
     risk_level: Mapped[str] = mapped_column(String(16), default="balanced")
     currency: Mapped[str] = mapped_column(String(8), default="USD")
+    preferred_sports: Mapped[str] = mapped_column(String(255), default="all")  # "all" or comma-separated: "soccer,basketball"
+    market_prefs: Mapped[str] = mapped_column(String(500), default="all")  # JSON: {"soccer": ["1X2","OU","BTTS"], "basketball": ["ML","OU"]}
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     last_seen: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=True)
 
@@ -62,6 +64,7 @@ async def init_db():
         migration_columns = [
             ("users", "currency", "VARCHAR(8) DEFAULT 'USD'"),
             ("users", "last_seen", "DATETIME"),
+            ("users", "preferred_sports", "VARCHAR(255) DEFAULT 'all'"),
             ("parlays", "ai_suggestion_score", "FLOAT"),
             ("parlays", "ai_suggestion_reason", "VARCHAR(255)"),
             ("parlays", "ai_suggested_at", "DATETIME"),
