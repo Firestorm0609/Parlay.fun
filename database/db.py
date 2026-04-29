@@ -36,8 +36,16 @@ class Parlay(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     settled_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
 
+    # AI suggestion fields
+    ai_suggestion_score: Mapped[float] = mapped_column(Float, nullable=True)
+    ai_suggestion_reason: Mapped[str] = mapped_column(String(255), nullable=True)
+    ai_suggested_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
 
-engine = create_async_engine(DATABASE_URL, echo=False)
+
+# NOTE: Alembic is used for database migrations.
+# Run `alembic upgrade head` on your VPS before starting the bot in production.
+# The async engine below is used for runtime operations.
+
 SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 
