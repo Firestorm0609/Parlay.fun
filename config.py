@@ -6,20 +6,25 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = "sqlite+aiosqlite:///parlay_bot.db"
 
-ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports/soccer/{league}/scoreboard"
+ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports/{sport}/{league}/scoreboard"
 
 LEAGUES = {
-    "eng.1": "Premier League",
-    "eng.fa": "FA Cup",
-    "esp.1": "La Liga",
-    "ger.1": "Bundesliga",
-    "ita.1": "Serie A",
-    "fra.1": "Ligue 1",
-    "usa.1": "MLS",
-    "bra.1": "Brazilian Serie A",
-    "mex.1": "Liga MX",
-    "arg.1": "Argentine Primera",
-    "uefa.champions": "Champions League",
+    # Soccer
+    "soccer/eng.1": "Premier League",
+    "soccer/esp.1": "La Liga",
+    "soccer/ger.1": "Bundesliga",
+    "soccer/ita.1": "Serie A",
+    "soccer/fra.1": "Ligue 1",
+    "soccer/usa.1": "MLS",
+    "soccer/uefa.champions": "Champions League",
+    # Basketball - NBA
+    "basketball/nba": "NBA",
+    # American Football - NFL
+    "football/nfl": "NFL",
+    # Baseball - MLB
+    "baseball/mlb": "MLB",
+    # Hockey - NHL
+    "hockey/nhl": "NHL",
 }
 
 RISK_LEVELS = {
