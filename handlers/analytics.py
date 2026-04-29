@@ -73,8 +73,14 @@ async def smart_bet_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     suggestion = await ai_suggester.suggest_parlay(user.id, risk_level)
     message = await ai_suggester.format_suggestion_message(suggestion)
 
-    kb = [[InlineKeyboardButton("🎯 Build This Parlay", callback_data="menu_parlay"),
-           InlineKeyboardButton("🏠 Menu", callback_data="menu_main")]]
+    if suggestion.get("has_suggestion"):
+        target_odds = suggestion.get("target_odds", 4.0)
+        kb = [[InlineKeyboardButton("🎯 Build This Parlay", callback_data=f"parlay_odds_{target_odds}"),
+               InlineKeyboardButton("🏠 Menu", callback_data="menu_main")]]
+    else:
+        kb = [[InlineKeyboardButton("🎯 Try Parlay", callback_data="menu_parlay"),
+               InlineKeyboardButton("🏠 Menu", callback_data="menu_main")]]
+
     markup = InlineKeyboardMarkup(kb)
 
     if update.message:
