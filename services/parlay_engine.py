@@ -10,7 +10,7 @@ class ParlayEngine:
         self.client = ESPNClient()
 
     async def gather_selections(self, date: str = None, markets=None):
-        markets = markets or ["1X2", "OU", "BTTS", "ML"]
+        markets = markets or ["1X2", "OU", "BTTS", "ML", "DC"]
         raw = await self.client.fetch_all_leagues(date)
         all_selections = []
 
@@ -21,11 +21,14 @@ class ParlayEngine:
             for fx in fixtures:
                 if fx["status"] != "pre":
                     continue
-                # Only use BTTS/1X2 for soccer
-                if fx.get("sport") == "soccer":
-                    mkt_list = ["1X2", "OU", "BTTS"]
+                sport = fx.get("sport", "soccer")
+                # Soccer gets all markets; others get ML + OU
+                if sport == "soccer":
+                    mkt_list = ["1X2", "OU", "BTTS", "ML", "DC"]
+                elif sport in ("basketball", "football", "baseball", "hockey"):
+                    mkt_list = ["OU", "ML"]
                 else:
-                    mkt_list = ["OU", "ML"]  # NBA/NFL/MLB/NHL: Over/Under + Money Line
+                    mkt_list = ["ML", "OU"]  # Rugby, cricket, etc.
                 for m in mkt_list:
                     all_selections.extend(evaluate_market(fx, m))
         return all_selections
