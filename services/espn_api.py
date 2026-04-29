@@ -19,8 +19,8 @@ class ESPNClient:
             await self.session.close()
 
     async def fetch_scoreboard(self, league: str, date: str = None):
-        """Fetch fixtures + odds from ESPN. date format: YYYYMMDD"""
-        url = ESPN_BASE.format(league=league)
+        """Fetch fixtures + odds from ESPN. league is like 'soccer/eng.1'"""
+        url = ESPN_BASE.format(path=league)
         params = {"dates": date} if date else {}
         session = await self._get_session()
         try:
