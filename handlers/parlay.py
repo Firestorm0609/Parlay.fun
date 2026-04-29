@@ -22,10 +22,34 @@ CHALLENGE_MAX_STAGES = {
 
 
 async def parlay_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Show active sport/market filters
+    filter_text = ""
+    try:
+        async with SessionLocal() as s:
+            res = await s.execute(
+                select(User).where(User.tg_id == update.effective_user.id))
+            user = res.scalar_one_or_none()
+        if user:
+            from handlers.sports import get_user_sports, get_user_markets, SPORT_CATEGORIES
+            sports = get_user_sports(user)
+            markets = get_user_markets(user)
+            sport_list = ", ".join(SPORT_CATEGORIES[s] for s in sorted(sports) if s in SPORT_CATEGORIES)
+            # Count total enabled markets
+            total_markets = sum(len(markets.get(s, [])) for s in sports)
+            filter_text = (
+                f"\n\n🔧 *Active Filters*\n"
+                f"Sports: {sport_list}\n"
+                f"Bet types: {total_markets} enabled\n"
+                f"[Configure → Sports Settings]"
+            )
+    except Exception:
+        pass
+
     text = (
         "🎯 *Build a Parlay*\n\n"
         "Select your *target odds* or enter a custom value.\n"
         "_Higher odds = more legs + more risk._"
+        f"{filter_text}"
     )
     buttons = []
     row = []
@@ -37,8 +61,8 @@ async def parlay_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             row = []
     buttons.append([InlineKeyboardButton("✏️ Custom Odds", callback_data="parlay_custom")])
     buttons.append([
-        InlineKeyboardButton("🏠 Main Menu", callback_data="menu_main"),
-        InlineKeyboardButton("❓ Help", callback_data="menu_help"),
+        InlineKeyboardButton("⚽ Sports", callback_data="menu_sports"),
+        InlineKeyboardButton("🏠 Menu", callback_data="menu_main"),
     ])
 
     markup = InlineKeyboardMarkup(buttons)
@@ -124,11 +148,19 @@ async def build_and_send(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
     engine = ParlayEngine()
     try:
+        # Get user's preferred sports and market prefs
+        user_sports = None
+        user_markets = None
+        if user:
+            from handlers.sports import get_user_sports, get_user_markets
+            user_sports = get_user_sports(user)
+            user_markets = get_user_markets(user)
+
         date = datetime.utcnow().strftime("%Y%m%d")
-        selections = await engine.gather_selections(date)
+        selections = await engine.gather_selections(date, sports=user_sports, market_prefs=user_markets)
         if not selections:
             date = (datetime.utcnow() + timedelta(days=1)).strftime("%Y%m%d")
-            selections = await engine.gather_selections(date)
+            selections = await engine.gather_selections(date, sports=user_sports, market_prefs=user_markets)
 
         if not selections:
             kb = [
@@ -239,6 +271,7 @@ async def track_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def regen_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer("🔁 Regenerating...")
+
     target = float(q.data[len("regen_"):])
     last = context.user_data.get("last_parlay", {})
     await build_and_send(
