@@ -4,6 +4,8 @@ from sqlalchemy import String, Float, Integer, DateTime, JSON, ForeignKey, text,
 from datetime import datetime, timedelta
 from config import DATABASE_URL
 
+import logging
+
 
 class Base(DeclarativeBase):
     pass
@@ -42,23 +44,32 @@ class Parlay(Base):
     ai_suggested_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
 
 
-# NOTE: Alembic is used for database migrations.
-# Run `alembic upgrade head` on your VPS before starting the bot in production.
-# The async engine below is used for runtime operations.
-
+# Async engine and session factory
+engine = create_async_engine(DATABASE_URL, echo=False)
 SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 
 async def init_db():
+    """
+    Initialize database schema.
+    For production, run 'alembic upgrade head' on your VPS before starting the bot.
+    This handles development setup and graceful column migrations.
+    """
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-        # Migrate existing DBs gracefully
-        for col_sql in [
-            "ALTER TABLE users ADD COLUMN currency VARCHAR(8) DEFAULT 'USD'",
-            "ALTER TABLE users ADD COLUMN last_seen DATETIME",
-        ]:
+
+        # Migrate existing DBs gracefully (SQLite doesn't support IF NOT EXISTS for columns)
+        migration_columns = [
+            ("users", "currency", "VARCHAR(8) DEFAULT 'USD'"),
+            ("users", "last_seen", "DATETIME"),
+            ("parlays", "ai_suggestion_score", "FLOAT"),
+            ("parlays", "ai_suggestion_reason", "VARCHAR(255)"),
+            ("parlays", "ai_suggested_at", "DATETIME"),
+        ]
+
+        for table, col, col_type in migration_columns:
             try:
-                await conn.execute(text(col_sql))
+                await conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}"))
             except Exception:
                 pass  # Column already exists
 
