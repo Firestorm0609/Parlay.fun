@@ -1,5 +1,7 @@
 from __future__ import with_statement
 import asyncio
+import sys
+from pathlib import Path
 from logging.config import fileConfig
 
 from sqlalchemy import engine_from_config
@@ -8,6 +10,9 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from alembic import context
+
+# Add project root to sys.path so 'database.db' can be found
+sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 # Import your models' Base here for autogenerate support
 from database.db import Base
