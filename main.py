@@ -19,6 +19,11 @@ from handlers.analytics import (
 )
 from handlers.challenges import challenges_menu, challenge_callback
 from handlers.settings import risk_menu, risk_set_callback
+from handlers.sports import (
+    sports_menu, sport_toggle_callback, sport_set_callback,
+    sport_config_callback, sport_mkt_toggle_callback,
+    sport_mkt_all_callback, sport_mkt_none_callback,
+)
 from handlers.admin import bot_stats_handler
 from services.odds_watcher import active_watches
 
@@ -62,6 +67,20 @@ async def menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await leaderboard_handler(update, context)
     elif data == "menu_smartbet":
         await smart_bet_handler(update, context)
+    elif data == "menu_sports":
+        await sports_menu(update, context)
+    elif data.startswith("sport_toggle_"):
+        await sport_toggle_callback(update, context)
+    elif data.startswith("sport_set_"):
+        await sport_set_callback(update, context)
+    elif data.startswith("sport_config_"):
+        await sport_config_callback(update, context)
+    elif data.startswith("sport_mkt_toggle_"):
+        await sport_mkt_toggle_callback(update, context)
+    elif data.startswith("sport_mkt_all_"):
+        await sport_mkt_all_callback(update, context)
+    elif data.startswith("sport_mkt_none_"):
+        await sport_mkt_none_callback(update, context)
 
 
 # ─── Text input router ────────────────────────────────────────────────
@@ -114,6 +133,12 @@ def main():
 
     # ── Settings ────────────────────────────────────────────────────────────
     app.add_handler(CallbackQueryHandler(risk_set_callback,      pattern=r"^risk_set_"))
+
+    # ── Sport config & market toggles ─────────────────────────────────
+    app.add_handler(CallbackQueryHandler(sport_config_callback,  pattern=r"^sport_config_"))
+    app.add_handler(CallbackQueryHandler(sport_mkt_toggle_callback, pattern=r"^sport_mkt_toggle_"))
+    app.add_handler(CallbackQueryHandler(sport_mkt_all_callback, pattern=r"^sport_mkt_all_"))
+    app.add_handler(CallbackQueryHandler(sport_mkt_none_callback, pattern=r"^sport_mkt_none_"))
 
     # ── Bankroll & currency ─────────────────────────────────────────────────
     app.add_handler(CallbackQueryHandler(bankroll_set_callback,  pattern=r"^bankroll_set_"))

@@ -78,6 +78,51 @@ RISK_LEVELS = {
     "aggressive": {"min_prob": 0.30, "max_odds_per_leg": 5.00, "max_legs": 10},
 }
 
+# Available bet markets per sport category
+SPORT_MARKETS = {
+    "soccer": {
+        "1X2":      {"label": "Match Result (1X2)",     "emoji": "⚽"},
+        "OU":        {"label": "Over/Under Goals",        "emoji": "🥅"},
+        "BTTS":      {"label": "Both Teams to Score",     "emoji": "🎯"},
+        "DC":        {"label": "Double Chance",           "emoji": "🔀"},
+        "SPREAD":    {"label": "Asian Handicap",          "emoji": "📐"},
+    },
+    "basketball": {
+        "ML":        {"label": "Money Line (Win)",         "emoji": "🏀"},
+        "OU":        {"label": "Over/Under Points",        "emoji": "🥅"},
+        "SPREAD":    {"label": "Point Spread",             "emoji": "📐"},
+    },
+    "football": {
+        "ML":        {"label": "Money Line (Win)",         "emoji": "🏈"},
+        "OU":        {"label": "Over/Under Points",        "emoji": "🥅"},
+        "SPREAD":    {"label": "Point Spread",             "emoji": "📐"},
+    },
+    "baseball": {
+        "ML":        {"label": "Money Line (Win)",         "emoji": "⚾"},
+        "OU":        {"label": "Over/Under Runs",          "emoji": "🥅"},
+        "SPREAD":    {"label": "Run Line",                 "emoji": "📐"},
+    },
+    "hockey": {
+        "ML":        {"label": "Money Line (Win)",         "emoji": "🏒"},
+        "OU":        {"label": "Over/Under Goals",         "emoji": "🥅"},
+        "SPREAD":    {"label": "Puck Line",                "emoji": "📐"},
+    },
+    "rugby": {
+        "ML":        {"label": "Money Line (Win)",         "emoji": "🏉"},
+        "OU":        {"label": "Over/Under Points",        "emoji": "🥅"},
+        "SPREAD":    {"label": "Point Spread",             "emoji": "📐"},
+    },
+    "cricket": {
+        "ML":        {"label": "Money Line (Win)",         "emoji": "🏏"},
+        "OU":        {"label": "Over/Under Runs",          "emoji": "🥅"},
+    },
+}
+
+# Default markets enabled per sport (all enabled by default)
+DEFAULT_MARKET_PREFS = {
+    sport: list(markets.keys()) for sport, markets in SPORT_MARKETS.items()
+}
+
 CHALLENGES = {
     "rollover_2": {"name": "2.0 Rollover", "target_odds": 2.0, "stages": 10},
     "rollover_1_5": {"name": "1.5 Rollover", "target_odds": 1.5, "stages": 15},
