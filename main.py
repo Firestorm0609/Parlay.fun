@@ -95,7 +95,7 @@ def main():
     # ── Commands ────────────────────────────────────────────────────────────
     app.add_handler(CommandHandler("start",    start))
     app.add_handler(CommandHandler("botstats", bot_stats_handler))
-    app.add_handler(CommandHandler("smart-bet", smart_bet_handler))
+    app.add_handler(CommandHandler("smartbet", smart_bet_handler))
     app.add_handler(CommandHandler("leaderboard", leaderboard_handler))
 
     # ── Menu routing ────────────────────────────────────────────────────────
