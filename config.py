@@ -9,22 +9,67 @@ DATABASE_URL = "sqlite+aiosqlite:///parlay_bot.db"
 ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports/{path}/scoreboard"
 
 LEAGUES = {
-    # Soccer
+    # ── Soccer ──────────────────────────────────────────────
+    # Top European Leagues
     "soccer/eng.1": "Premier League",
     "soccer/esp.1": "La Liga",
     "soccer/ger.1": "Bundesliga",
     "soccer/ita.1": "Serie A",
     "soccer/fra.1": "Ligue 1",
-    "soccer/usa.1": "MLS",
+    "soccer/por.1": "Primeira Liga",
+    "soccer/ned.1": "Eredivisie",
+    "soccer/be.1": "Pro League",
+    "soccer/tur.1": "Super Lig",
+    # Cups & International
     "soccer/uefa.champions": "Champions League",
-    # Basketball - NBA
+    "soccer/uefa.europa": "Europa League",
+    "soccer/uefa.europa.conf": "Conference League",
+    "soccer/eng.fa": "FA Cup",
+    "soccer/esp.copa": "Copa del Rey",
+    "soccer/fifa.ww": "World Cup",
+    "soccer/uefa.nations": "Nations League",
+    # Americas
+    "soccer/usa.1": "MLS",
+    "soccer/bra.1": "Brasileiro Serie A",
+    "soccer/mex.1": "Liga MX",
+    "soccer/arg.1": "Argentine Primera",
+    "soccer/col.1": "Categoría Primera A",
+    "soccer/chi.1": "Chilean Primera",
+    # Rest of World
+    "soccer/saf.1": "Premier Soccer League",
+    "soccer/jpn.1": "J1 League",
+    "soccer/kor.1": "K League 1",
+    "soccer/aus.1": "A-League",
+    "soccer/saudi.1": "Saudi Pro League",
+
+    # ── Basketball ─────────────────────────────────────────
     "basketball/nba": "NBA",
-    # American Football - NFL
+    "basketball/wnba": "WNBA",
+    "basketball/esp.1": "Liga ACB",
+    "basketball/usa.ncaa": "NCAA Men's Basketball",
+    "basketball/esp.acb": "Spanish ACB",
+
+    # ── American Football ────────────────────────────────
     "football/nfl": "NFL",
-    # Baseball - MLB
+    "football/usa.ncaa": "NCAA FBS",
+    "football/eng.1": "NFL UK",
+
+    # ── Baseball ──────────────────────────────────────────
     "baseball/mlb": "MLB",
-    # Hockey - NHL
+    "baseball/usa.ncaa": "NCAA Baseball",
+    "baseball/jpn.1": "NPB",
+    "baseball/kor.1": "KBO",
+
+    # ── Hockey ────────────────────────────────────────────
     "hockey/nhl": "NHL",
+    "hockey/usa.ncaa": "NCAA Hockey",
+    "hockey/rus.1": "KHL",
+
+    # ── Other Sports ─────────────────────────────────────
+    "rugby/eng.1": "Premiership Rugby",
+    "rugby/fra.1": "Top 14",
+    "cricket/eng.1": "County Championship",
+    "cricket/ind.1": "IPL",
 }
 
 RISK_LEVELS = {
