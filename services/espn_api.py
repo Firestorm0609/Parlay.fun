@@ -39,29 +39,48 @@ class ESPNClient:
 
     @staticmethod
     def parse_events(raw, league_code):
-        """Extract normalized fixture data with odds."""
+        """Extract normalized fixture data with odds. Supports multiple sports."""
         if not raw or "events" not in raw:
             return []
 
         fixtures = []
+        sport = league_code.split("/")[0] if "/" in league_code else "soccer"
+
         for event in raw["events"]:
             try:
                 comp = event["competitions"][0]
                 competitors = comp["competitors"]
-                home = next(c for c in competitors if c["homeAway"] == "home")
-                away = next(c for c in competitors if c["homeAway"] == "away")
+
+                if sport == "soccer":
+                    home = next((c for c in competitors if c["homeAway"] == "home"), None)
+                    away = next((c for c in competitors if c["homeAway"] == "away"), None)
+                    if not home or not away:
+                        continue
+                    home_form = home.get("form", "")
+                    away_form = away.get("form", "")
+                    draw_odds = comp.get("odds", [{}])[0].get("drawOdds")
+                else:
+                    # NBA, NFL, MLB, NHL - no draw, no form
+                    home = competitors[0] if competitors[0]["homeAway"] == "home" else competitors[1]
+                    away = competitors[1] if competitors[1]["homeAway"] == "away" else competitors[0]
+                    if not home or not away:
+                        continue
+                    home_form = ""
+                    away_form = ""
+                    draw_odds = None
 
                 fixture = {
                     "id": event["id"],
                     "league": league_code,
+                    "sport": sport,
                     "date": event["date"],
                     "status": event["status"]["type"]["state"],
                     "home_team": home["team"]["displayName"],
                     "away_team": away["team"]["displayName"],
                     "home_score": int(home.get("score", 0) or 0),
                     "away_score": int(away.get("score", 0) or 0),
-                    "home_form": home.get("form", ""),
-                    "away_form": away.get("form", ""),
+                    "home_form": home_form,
+                    "away_form": away_form,
                     "venue": comp.get("venue", {}).get("fullName", ""),
                     "odds": None,
                 }
@@ -74,11 +93,11 @@ class ESPNClient:
                         "spread":     o.get("spread"),
                         "home_ml":    o.get("homeTeamOdds", {}).get("moneyLine"),
                         "away_ml":    o.get("awayTeamOdds", {}).get("moneyLine"),
-                        "draw_odds":  o.get("drawOdds", {}).get("moneyLine") if o.get("drawOdds") else None,
+                        "draw_odds":  o.get("drawOdds", {}).get("moneyLine") if draw_odds else None,
                         "provider":   o.get("provider", {}).get("name", "DraftKings"),
                     }
                 fixtures.append(fixture)
-            except Exception:
+            except Exception as e:
                 continue
         return fixtures
 
