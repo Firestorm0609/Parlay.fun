@@ -1,14 +1,15 @@
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
-from sqlalchemy import select, func
+from sqlalchemy import select, func, case
 from services.tracker import ParlayTracker
-from database.db import SessionLocal, User
+from services.ai_suggester import ai_suggester
+from database.db import SessionLocal, User, Parlay
 from utils.helpers import format_stats, currency_symbol, CURRENCY_SYMBOLS
 
 BANKROLL_PRESETS = [50, 100, 250, 500, 1000, 2500, 5000]
 
 
-# ─── Stats ────────────────────────────────────────────────────────────────────
+# ─── Stats ────────────────────────────────────────────────────────────
 
 async def stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message or update.callback_query.message
@@ -49,7 +50,40 @@ async def stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text(text, parse_mode="Markdown", reply_markup=markup)
 
 
-# ─── Bankroll ─────────────────────────────────────────────────────────────────
+# ─── Smart Bet (AI Suggestion) ─────────────────────────────────────
+
+async def smart_bet_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /smart-bet command with AI-driven parlay suggestions."""
+    user_id = update.effective_user.id
+
+    async with SessionLocal() as s:
+        res = await s.execute(select(User).where(User.tg_id == user_id))
+        user = res.scalar_one_or_none()
+
+    if not user:
+        kb = [[InlineKeyboardButton("🏠 Main Menu", callback_data="menu_main")]]
+        text = "⚠️ Please /start the bot first to use AI suggestions."
+        if update.message:
+            await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(kb))
+        else:
+            await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb))
+        return
+
+    risk_level = getattr(user, "risk_level", "balanced")
+    suggestion = await ai_suggester.suggest_parlay(user.id, risk_level)
+    message = await ai_suggester.format_suggestion_message(suggestion)
+
+    kb = [[InlineKeyboardButton("🎯 Build This Parlay", callback_data="menu_parlay"),
+           InlineKeyboardButton("🏠 Menu", callback_data="menu_main")]]
+    markup = InlineKeyboardMarkup(kb)
+
+    if update.message:
+        await update.message.reply_text(message, parse_mode="Markdown", reply_markup=markup)
+    else:
+        await update.callback_query.edit_message_text(message, parse_mode="Markdown", reply_markup=markup)
+
+
+# ─── Bankroll ─────────────────────────────────────────────────────────
 
 async def bankroll_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message or update.callback_query.message
@@ -78,7 +112,6 @@ async def bankroll_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Set balance:"
     )
 
-    # Preset balance buttons — 3 per row
     preset_buttons = []
     row = []
     for i, amt in enumerate(BANKROLL_PRESETS):
@@ -200,7 +233,7 @@ async def handle_custom_balance(update: Update, context: ContextTypes.DEFAULT_TY
     return True  # consumed
 
 
-# ─── Currency ─────────────────────────────────────────────────────────────────
+# ─── Currency ─────────────────────────────────────────────────────────
 
 async def currency_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -217,7 +250,6 @@ async def currency_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Current: *{current} {currency_symbol(current)}*"
     )
 
-    # Build currency grid — 3 per row
     buttons = []
     row = []
     for i, (code, sym) in enumerate(CURRENCY_SYMBOLS.items()):
@@ -255,3 +287,68 @@ async def currency_set_callback(update: Update, context: ContextTypes.DEFAULT_TY
         f"✅ Currency updated to *{new_currency} {sym}*",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(kb))
+
+
+# ─── Leaderboard ──────────────────────────────────────────────────────
+
+async def leaderboard_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show top 5 users by ROI with anonymized names."""
+    async with SessionLocal() as s:
+        stmt = (
+            select(
+                User.id,
+                User.username,
+                func.sum(Parlay.stake).label("stake"),
+                func.sum(
+                    case(
+                        (Parlay.status == "won", (Parlay.total_odds - 1) * Parlay.stake),
+                        else_=-Parlay.stake
+                    )
+                ).label("profit")
+            )
+            .join(Parlay, Parlay.user_id == User.id)
+            .group_by(User.id)
+            .having(func.sum(Parlay.stake) > 0)
+            .order_by(
+                (
+                    func.sum(
+                        case(
+                            (Parlay.status == "won", (Parlay.total_odds - 1) * Parlay.stake),
+                            else_=-Parlay.stake
+                        )
+                    ) / func.sum(Parlay.stake)
+                ).desc()
+            )
+            .limit(5)
+        )
+        rows = (await s.execute(stmt)).fetchall()
+
+    if not rows:
+        text = "🏆 *Leaderboard*\n\nNo completed parlays yet. Be the first to place a tracked parlay!"
+    else:
+        lines = ["🏆 *Top 5 ROI Leaderboard*\n"]
+        medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"]
+        for i, row in enumerate(rows):
+            # Anonymize username
+            if row.username and len(row.username) > 3:
+                masked = f"{row.username[:2]}••{row.username[-1]}"
+            elif row.username:
+                masked = f"{row.username[0]}•••"
+            else:
+                masked = f"User{row.id}"
+            roi = (row.profit / row.stake * 100) if row.stake else 0
+            lines.append(f"{medals[i]} {masked} — ROI {roi:.1f}%")
+
+        text = "\n".join(lines)
+
+    kb = [
+        [InlineKeyboardButton("🎯 Build Parlay", callback_data="menu_parlay")],
+        [InlineKeyboardButton("🏠 Main Menu", callback_data="menu_main")],
+    ]
+    markup = InlineKeyboardMarkup(kb)
+
+    if update.callback_query:
+        await update.callback_query.edit_message_text(
+            text, parse_mode="Markdown", reply_markup=markup)
+    else:
+        await update.message.reply_text(text, parse_mode="Markdown", reply_markup=markup)
