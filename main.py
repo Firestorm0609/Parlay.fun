@@ -14,11 +14,13 @@ from handlers.parlay import (
 from handlers.analytics import (
     stats_handler, bankroll_handler, bankroll_set_callback,
     bankroll_custom_prompt, handle_custom_balance,
-    currency_menu, currency_set_callback,
+    currency_menu, currency_set_callback, smart_bet_handler,
+    leaderboard_handler,
 )
 from handlers.challenges import challenges_menu, challenge_callback
 from handlers.settings import risk_menu, risk_set_callback
 from handlers.admin import bot_stats_handler
+from services.odds_watcher import active_watches
 
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -26,7 +28,7 @@ logging.basicConfig(
 )
 
 
-# ─── Presence middleware ───────────────────────────────────────────────────────
+# ─── Presence middleware ───────────────────────────────────────────────
 
 async def presence_middleware(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Update last_seen on every interaction so online-count stays accurate."""
@@ -34,7 +36,7 @@ async def presence_middleware(update: Update, context: ContextTypes.DEFAULT_TYPE
         await touch_user(update.effective_user.id)
 
 
-# ─── Menu router ──────────────────────────────────────────────────────────────
+# ─── Menu router ──────────────────────────────────────────────────────
 
 async def menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -56,9 +58,11 @@ async def menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await help_handler(update, context)
     elif data == "menu_botstats":
         await bot_stats_handler(update, context)
+    elif data == "menu_leaderboard":
+        await leaderboard_handler(update, context)
 
 
-# ─── Text input router ────────────────────────────────────────────────────────
+# ─── Text input router ────────────────────────────────────────────────
 
 async def text_input_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Route typed messages to the active input handler (balance or odds)."""
@@ -67,11 +71,13 @@ async def text_input_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await handle_custom_odds(update, context)
 
 
-# ─── Startup ──────────────────────────────────────────────────────────────────
+# ─── Startup ──────────────────────────────────────────────────────────
 
 async def post_init(app):
     await init_db()
     logging.info("DB initialized")
+    # Store active_watches reference in bot_data for cleanup
+    app.bot_data["active_watches"] = active_watches
 
 
 def main():
@@ -89,6 +95,8 @@ def main():
     # ── Commands ────────────────────────────────────────────────────────────
     app.add_handler(CommandHandler("start",    start))
     app.add_handler(CommandHandler("botstats", bot_stats_handler))
+    app.add_handler(CommandHandler("smart-bet", smart_bet_handler))
+    app.add_handler(CommandHandler("leaderboard", leaderboard_handler))
 
     # ── Menu routing ────────────────────────────────────────────────────────
     app.add_handler(CallbackQueryHandler(menu_router,            pattern=r"^menu_"))
