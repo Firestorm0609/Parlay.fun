@@ -9,26 +9,42 @@ class ParlayEngine:
     def __init__(self):
         self.client = ESPNClient()
 
-    async def gather_selections(self, date: str = None, markets=None):
-        markets = markets or ["1X2", "OU", "BTTS", "ML", "DC"]
+    async def gather_selections(self, date: str = None, markets=None, sports=None, market_prefs=None):
+        """Gather selections, optionally filtered by sport set and market prefs.
+
+        market_prefs: dict mapping sport -> list of enabled market types.
+                      If None, all markets for each sport are used.
+        """
         raw = await self.client.fetch_all_leagues(date)
         all_selections = []
 
         for league_code, data in raw.items():
             if isinstance(data, Exception) or not data:
                 continue
+
+            # Filter by user's preferred sports if provided
+            sport = league_code.split("/")[0] if "/" in league_code else "soccer"
+            if sports and sport not in sports:
+                continue
+
             fixtures = ESPNClient.parse_events(data, league_code)
             for fx in fixtures:
                 if fx["status"] != "pre":
                     continue
-                sport = fx.get("sport", "soccer")
-                # Soccer gets all markets; others get ML + OU
-                if sport == "soccer":
-                    mkt_list = ["1X2", "OU", "BTTS", "ML", "DC"]
-                elif sport in ("basketball", "football", "baseball", "hockey"):
-                    mkt_list = ["OU", "ML"]
+                fx_sport = fx.get("sport", "soccer")
+
+                # Determine which markets to evaluate for this fixture
+                if market_prefs and fx_sport in market_prefs:
+                    mkt_list = market_prefs[fx_sport]
                 else:
-                    mkt_list = ["ML", "OU"]  # Rugby, cricket, etc.
+                    # Default market list per sport
+                    if fx_sport == "soccer":
+                        mkt_list = ["1X2", "OU", "BTTS", "ML", "DC", "SPREAD"]
+                    elif fx_sport in ("basketball", "football", "baseball", "hockey"):
+                        mkt_list = ["OU", "ML", "SPREAD"]
+                    else:
+                        mkt_list = ["ML", "OU"]
+
                 for m in mkt_list:
                     all_selections.extend(evaluate_market(fx, m))
         return all_selections

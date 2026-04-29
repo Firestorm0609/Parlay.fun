@@ -170,6 +170,39 @@ def evaluate_market(fixture, market_type):
             "confidence": _confidence(under_p, under_odds, 0),
         })
 
+    if market_type == "SPREAD":
+        # Point spread betting (basketball, football, etc.)
+        spread = odds.get("spread")
+        if spread is None:
+            return selections
+        spread = float(spread)
+        # Home covers if they win by more than spread, Away covers if they lose by less or win
+        # Fair probability estimate: spread of 0 = 50/50, each point ~3% shift
+        home_spread_p = max(0.30, min(0.70, 0.50 - spread * 0.03))
+        away_spread_p = 1 - home_spread_p
+
+        # Adjust based on form/momentum for basketball/football
+        if not is_soccer:
+            form_adj = (home_form["score"] - away_form["score"]) * 0.04
+            home_spread_p = max(0.25, min(0.75, home_spread_p + form_adj))
+            away_spread_p = 1 - home_spread_p
+
+        home_spread_odds = round(1 / max(home_spread_p, 0.01) * 0.95, 2)
+        away_spread_odds = round(1 / max(away_spread_p, 0.01) * 0.95, 2)
+
+        selections.append({
+            "fixture": fixture, "market": "SPREAD", "selection": f"{fixture['home_team']} -{abs(spread)}",
+            "label": f"{fixture['home_team']} -{abs(spread)}",
+            "odds": home_spread_odds, "probability": home_spread_p,
+            "confidence": _confidence(home_spread_p, home_spread_odds, 0),
+        })
+        selections.append({
+            "fixture": fixture, "market": "SPREAD", "selection": f"{fixture['away_team']} +{abs(spread)}",
+            "label": f"{fixture['away_team']} +{abs(spread)}",
+            "odds": away_spread_odds, "probability": away_spread_p,
+            "confidence": _confidence(away_spread_p, away_spread_odds, 0),
+        })
+
     if market_type == "BTTS":
         # Heuristic from forms & ML probabilities
         attack_factor = (home_form["score"] + away_form["score"]) / 2
