@@ -10,7 +10,7 @@ class ParlayEngine:
         self.client = ESPNClient()
 
     async def gather_selections(self, date: str = None, markets=None):
-        markets = markets or ["1X2", "OU", "BTTS"]
+        markets = markets or ["1X2", "OU", "BTTS", "ML"]
         raw = await self.client.fetch_all_leagues(date)
         all_selections = []
 
@@ -21,13 +21,25 @@ class ParlayEngine:
             for fx in fixtures:
                 if fx["status"] != "pre":
                     continue
-                for m in markets:
+                # Only use BTTS/1X2 for soccer
+                if fx.get("sport") == "soccer":
+                    mkt_list = ["1X2", "OU", "BTTS"]
+                else:
+                    mkt_list = ["OU", "ML"]  # NBA/NFL/MLB/NHL: Over/Under + Money Line
+                for m in mkt_list:
                     all_selections.extend(evaluate_market(fx, m))
         return all_selections
 
     def build_parlay(self, selections, target_odds, risk="balanced", tolerance=0.15):
         """Find a combination of selections close to target_odds."""
         cfg = RISK_LEVELS[risk]
+
+        # Dynamic tolerance: tighter for low targets, looser for high targets
+        if target_odds >= 10:
+            tolerance = 0.30  # Allow 30% deviation for high-odds parlays
+        elif target_odds >= 5:
+            tolerance = 0.20
+
         # Filter by criteria
         pool = [
             s for s in selections
@@ -37,8 +49,9 @@ class ParlayEngine:
         ]
         # Sort by confidence
         pool.sort(key=lambda x: x["confidence"], reverse=True)
-        # Trim pool to keep combinatorics manageable
-        pool = pool[:40]
+        # Dynamic pool size: more selections for higher targets
+        pool_limit = min(80 if target_odds >= 10 else 40, len(pool))
+        pool = pool[:pool_limit]
 
         # Avoid same fixture twice
         best = None
