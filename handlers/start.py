@@ -19,8 +19,11 @@ def _main_menu_markup():
             InlineKeyboardButton("🤖 Smart Bet",   callback_data="menu_smartbet"),
         ],
         [
-            InlineKeyboardButton("👥 Bot Stats", callback_data="menu_botstats"),
+            InlineKeyboardButton("🏟️ Sports",      callback_data="menu_sports"),
             InlineKeyboardButton("❓ Help",       callback_data="menu_help"),
+        ],
+        [
+            InlineKeyboardButton("👥 Bot Stats", callback_data="menu_botstats"),
         ],
     ]
     return InlineKeyboardMarkup(kb)
