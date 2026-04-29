@@ -60,6 +60,8 @@ async def menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await bot_stats_handler(update, context)
     elif data == "menu_leaderboard":
         await leaderboard_handler(update, context)
+    elif data == "menu_smartbet":
+        await smart_bet_handler(update, context)
 
 
 # ─── Text input router ────────────────────────────────────────────────
