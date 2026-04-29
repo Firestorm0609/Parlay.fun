@@ -36,7 +36,10 @@ async def parlay_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             buttons.append(row)
             row = []
     buttons.append([InlineKeyboardButton("✏️ Custom Odds", callback_data="parlay_custom")])
-    buttons.append([InlineKeyboardButton("🏠 Main Menu", callback_data="menu_main")])
+    buttons.append([
+        InlineKeyboardButton("🏠 Main Menu", callback_data="menu_main"),
+        InlineKeyboardButton("❓ Help", callback_data="menu_help"),
+    ])
 
     markup = InlineKeyboardMarkup(buttons)
     if update.callback_query:
